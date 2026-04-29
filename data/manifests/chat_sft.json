@@ -1,0 +1,13 @@
+{
+  "datasets": [
+    {
+      "name": "全量对话数据集名字，对基座模型进行chat训练",
+      "path": "文件路径",
+      "weight": 1.0
+    }, {
+      "name": "data_chat",
+      "path": "../structured/data.chat.jsonl",
+      "weight": 1
+    }
+  ]
+}

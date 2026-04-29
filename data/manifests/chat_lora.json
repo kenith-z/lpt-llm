@@ -1,0 +1,9 @@
+{
+  "datasets": [
+    {
+      "name": "LoRA数据集名字",
+      "path": "文件路径",
+      "weight": 1.0
+    }
+  ]
+}
