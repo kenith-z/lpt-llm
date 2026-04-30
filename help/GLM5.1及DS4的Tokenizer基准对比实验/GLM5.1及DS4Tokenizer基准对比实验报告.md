@@ -132,7 +132,7 @@ GLM5.1 使用同一 token 作为 EOS 与 PAD。DS4Tokenizer 对 BOS、EOS、PAD 
 
 ### 4.4 LongRoPE2 Factor Sweep
 
-本轮新增 GLM5.1 `text_pretrain` checkpoint 后，先前“无法严格复跑 GLM5.1 sweep”的限制已经解除。两侧 checkpoint 元数据如下：
+两侧 checkpoint 元数据如下：
 
 | 项目 | GLM5.1 | DS4Tokenizer |
 |---|---|---|
