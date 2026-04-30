@@ -46,7 +46,6 @@ def build_argument_parser():
 def main():
     """按模型类型加载推理模型并启动终端对话。"""
     args = build_argument_parser().parse_args()
-    args.model='text_base'
     model_loader = MODEL_LOADERS[args.model]
     execution_config = build_execution_config(args)
     if args.model in {"lora", "chat_lora"}:

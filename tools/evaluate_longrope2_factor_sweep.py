@@ -145,13 +145,13 @@ def build_argument_parser():
     parser.add_argument(
         "--uniform-factor",
         action="append",
-        default=(),
+        default=None,
         help="追加一组统一缩放因子，格式 name=value，可重复。",
     )
     parser.add_argument(
         "--factors-file",
         action="append",
-        default=(),
+        default=None,
         help="追加一组因子文件，格式 name=path，可重复。文件内容会导入为数组，不写入 checkpoint。",
     )
     parser.add_argument(
@@ -175,11 +175,11 @@ def main(argv=None):
     try:
         uniform_factor_candidates = tuple(
             _parse_uniform_factor(raw_value)
-            for raw_value in args.uniform_factor
+            for raw_value in (args.uniform_factor or ())
         )
         factor_file_candidates = tuple(
             _parse_factors_file(raw_value)
-            for raw_value in args.factors_file
+            for raw_value in (args.factors_file or ())
         )
     except ValueError as error:
         parser.error(str(error))

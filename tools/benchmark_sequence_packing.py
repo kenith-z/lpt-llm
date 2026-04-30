@@ -27,7 +27,12 @@ from lpt_training.train import (
     _unpack_training_batch,
     configure_training_runtime,
 )
-from lpt_workflows.common import build_local_tokenizer, load_dataset_from_manifest
+from lpt_workflows.common import (
+    TOKENIZER_PATH,
+    build_local_tokenizer,
+    build_tokenizer_metadata,
+    load_dataset_from_manifest,
+)
 
 
 @dataclass(frozen=True)
@@ -353,6 +358,7 @@ def main(argv=None):
             "train_rope_cache_max_sequence_length": int(GlobalConfig.train_rope_cache_max_sequence_length),
             "inference_rope_cache_max_sequence_length": int(GlobalConfig.inference_rope_cache_max_sequence_length),
         },
+        "tokenizer": build_tokenizer_metadata(tokenizer, TOKENIZER_PATH),
         "benchmark": [result.to_dict() for result in results],
     }
     if len(results) == 2:

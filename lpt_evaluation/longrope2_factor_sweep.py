@@ -22,7 +22,11 @@ from lpt_config import (
 from lpt_lora.adapter import attach_lora_adapters
 from lpt_model import LPT
 from lpt_training import load_checkpoint
-from lpt_workflows.common import TOKENIZER_PATH, build_local_tokenizer
+from lpt_workflows.common import (
+    TOKENIZER_PATH,
+    build_local_tokenizer,
+    build_tokenizer_metadata,
+)
 
 from .long_context import (
     DEFAULT_GENERATION_CONFIG,
@@ -198,9 +202,9 @@ def _build_generation_config(max_generation_tokens):
     )
 
 
-def _build_base_checkpoint_summary(checkpoint, checkpoint_root, model_config):
+def _build_base_checkpoint_summary(checkpoint, checkpoint_root, model_config, tokenizer=None):
     architecture_metadata = dict(checkpoint.get("model_architecture_metadata", {}))
-    return {
+    summary = {
         "checkpoint_path": str(checkpoint_root.with_suffix(".pth")),
         "checkpoint_schema_version": checkpoint.get("checkpoint_schema_version"),
         "model_config_schema_version": checkpoint.get("model_config_schema_version"),
@@ -213,6 +217,15 @@ def _build_base_checkpoint_summary(checkpoint, checkpoint_root, model_config):
             model_config.longrope2_long_factors
         ),
     }
+    if tokenizer is not None:
+        summary["tokenizer"] = build_tokenizer_metadata(tokenizer, TOKENIZER_PATH)
+        summary["checkpoint_tokenizer"] = {
+            "tokenizer_category": checkpoint.get("tokenizer_category"),
+            "tokenizer_eos_token": checkpoint.get("tokenizer_eos_token"),
+            "tokenizer_pad_token": checkpoint.get("tokenizer_pad_token"),
+            "chat_template_version": checkpoint.get("chat_template_version"),
+        }
+    return summary
 
 
 def _build_candidate_model_config(base_model_config, candidate):
@@ -331,6 +344,7 @@ def evaluate_longrope2_factor_sweep(config: LongRoPE2FactorSweepConfig):
             checkpoint,
             checkpoint_root,
             base_model_config,
+            tokenizer,
         ),
         "runtime": {
             "device": str(GlobalConfig.device),
@@ -408,6 +422,17 @@ def format_longrope2_factor_sweep_report_markdown(report):
         f"- checkpoint_path: {checkpoint['checkpoint_path']}",
         f"- training_stage: {checkpoint['training_stage']}",
         f"- source_manifest: {checkpoint['source_manifest']}",
+    ]
+    tokenizer = checkpoint.get("tokenizer")
+    if tokenizer is not None:
+        lines.extend(
+            [
+                f"- tokenizer_path: {tokenizer.get('tokenizer_path')}",
+                f"- tokenizer_vocab_size: {tokenizer.get('vocab_size')}",
+                f"- tokenizer_bos/eos/pad: {tokenizer.get('bos_token')} / {tokenizer.get('eos_token')} / {tokenizer.get('pad_token')}",
+            ]
+        )
+    lines.extend([
         "",
         "## Runtime",
         f"- device: {report['runtime']['device']}",
@@ -417,7 +442,7 @@ def format_longrope2_factor_sweep_report_markdown(report):
         "## Candidates",
         "| name | status | source | factor_mode | min_factor | max_factor | needle_exact | retrieval_exact | ppl | latency_sec |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-    ]
+    ])
     for candidate in report["candidates"]:
         factor_summary = candidate["longrope_factor_summary"]
         lines.append(

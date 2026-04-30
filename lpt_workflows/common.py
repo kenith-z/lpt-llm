@@ -1,6 +1,7 @@
 """多训练阶段共享的辅助函数。"""
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import random
 
@@ -29,6 +30,16 @@ from lpt_training import load_checkpoint, prepare_tokenizer
 
 TOKENIZER_PATH = Path("./lpt_model/ds_tokenizer")
 ARTIFACT_ROOT_DIR = Path("./artifacts/lpt_ds_v1")
+
+
+def _hash_file_sha256(path: Path):
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as file_obj:
+        for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -269,6 +280,35 @@ def build_local_tokenizer(tokenizer_path: Path = TOKENIZER_PATH):
         local_files_only=True,
     )
     return prepare_tokenizer(tokenizer)
+
+
+def build_tokenizer_metadata(tokenizer, tokenizer_path: Path | None = TOKENIZER_PATH):
+    """生成实验报告可追溯的 tokenizer 元数据。"""
+    tokenizer_path = None if tokenizer_path is None else Path(tokenizer_path)
+    tokenizer_config_path = None
+    if tokenizer_path is not None:
+        tokenizer_config_path = tokenizer_path / "tokenizer_config.json"
+    special_tokens_map = {
+        key: str(value)
+        for key, value in (getattr(tokenizer, "special_tokens_map", {}) or {}).items()
+    }
+    return {
+        "tokenizer_path": str(tokenizer_path) if tokenizer_path is not None else None,
+        "tokenizer_name_or_path": str(getattr(tokenizer, "name_or_path", "")),
+        "tokenizer_config_sha256": (
+            _hash_file_sha256(tokenizer_config_path)
+            if tokenizer_config_path is not None
+            else None
+        ),
+        "vocab_size": len(tokenizer),
+        "bos_token": getattr(tokenizer, "bos_token", None),
+        "bos_token_id": getattr(tokenizer, "bos_token_id", None),
+        "eos_token": getattr(tokenizer, "eos_token", None),
+        "eos_token_id": getattr(tokenizer, "eos_token_id", None),
+        "pad_token": getattr(tokenizer, "pad_token", None),
+        "pad_token_id": getattr(tokenizer, "pad_token_id", None),
+        "special_tokens_map": special_tokens_map,
+    }
 
 
 def load_model_config_from_checkpoint_root(checkpoint_root: Path, *, map_location=None):
