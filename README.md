@@ -34,9 +34,10 @@
 
 | 配置项 | 默认值 |
 |---|---:|
-| `num_layers` | 16 |
+| `num_layers` | 16（8 组 RetNet/Attention，即 2n） |
 | `num_heads` | 8 |
 | `num_kv_heads` | 2 |
+| `cla_share_every_n_layers` | 2 |
 | `head_dim` | 64 |
 | `hidden_size` | 512 |
 | block 类型 | RetNet 与 Attention 交替 |
@@ -44,11 +45,38 @@
 | `longrope2_target_length` | 跟随推理最大长度配置 |
 | LongRoPE2 训练/推理 embedding | `mixed` |
 
-模型结构不应在训练脚本或推理脚本中硬编码。已有 checkpoint 时，模型结构以 checkpoint 或 artifacts 中的 `config/model_config.json` 为准。
+### 当前模型结构
+
+LPT 当前是 decoder-only 语言模型，主干由 `RetNet` 与 `Attention` 两类 sequence mixer 交替组成：
+
+```text
+input_ids
+  -> token_embedding
+  -> 2n x TransformerBlock
+       -> RMSNorm
+       -> sequence mixer: RetNet / Attention 交替
+       -> residual
+       -> RMSNorm
+       -> SwiGLU FFN
+       -> residual
+  -> final RMSNorm
+  -> tied lm_head
+  -> logits
+```
+
+默认层序为 `RetNet, Attention` 交替重复 n 组；当前默认 n=8，共 16 层。每个 `TransformerBlock` 只负责统一的归一化、残差和 FFN 包装，序列混合能力由 `layer_block_types` 指定的 mixer 决定。
+
+- `Attention` 层使用 GQA：`num_heads=8`、`num_kv_heads=2`、`head_dim=64`，每 4 个 query head 共享 1 组 KV head；优先使用 PyTorch SDPA 原生 `enable_gqa`，不支持时回退到手工扩展 KV。
+- Attention KV Cache 同时使用 CLA（跨层 Attention 状态复用）：默认 `cla_share_every_n_layers=2`，每 2 个 Attention 层共享一个 KV 状态槽位；共享组内首个 Attention 层写入 KV，后续 Attention 层以只读方式复用该 KV。RetNet 层不参与 CLA，仍独立保存 retention state。
+- `RetNet` 层使用多尺度 retention：默认 `retnet_value_factor=1`、`retnet_gate_fn=swish`、`retnet_chunk_size=256`，位置部分使用 XPOS 相对位置编码，支持并行、chunkwise prefill 和递归增量解码三种表示。
+- FFN 使用 `SwiGLU`，中间维度按 `8 * hidden_size / 3` 计算后对齐到 256；输入 embedding 与输出 `lm_head` 权重共享。
+- 层状态统一抽象为 `LayerState`：Attention 层保存经过 GQA 和 CLA 压缩后的 KV 状态，RetNet 层保存 retention state，供 prefill、增量推理和 `InferenceSession / CacheManager` 复用。
+
+**注：模型当前结构并非最终结构。**
 
 ## Tokenizer
 
-当前分支默认 tokenizer：
+当前分支默认 tokenizer：DeepSeek-V4-Pro
 
 ```text
 lpt_model/ds_tokenizer
@@ -66,8 +94,6 @@ lpt_model/ds_tokenizer
 
 相关报告：
 
-- `help/20260429Tokenizer切换基准实验报告.md`
-- `help/20260501Tokenizer切换同源1-11基准对比实验报告.md`
 - `help/GLM5.1及DS4的Tokenizer基准对比实验/GLM5.1及DS4Tokenizer基准对比实验报告.md`
 
 ## 目录结构
