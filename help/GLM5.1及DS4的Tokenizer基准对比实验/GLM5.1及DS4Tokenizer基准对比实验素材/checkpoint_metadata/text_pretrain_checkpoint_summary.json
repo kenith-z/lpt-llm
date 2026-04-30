@@ -1,0 +1,58 @@
+{
+  "generated_at": "2026-05-01T01:47:28",
+  "note": "本文件仅记录 checkpoint 元数据和哈希；未复制 .pth 权重本体。",
+  "checkpoints": [
+    {
+      "label": "GLM5.1 text_pretrain",
+      "source_checkpoint_path": ".tmp_moe_llm_GLM\\artifacts\\lpt_native_v1\\text_pretrain\\checkpoints\\latest.pth",
+      "file_size_bytes": 531227003,
+      "last_write_time": "2026-05-01T01:33:31",
+      "sha256": "6d41ba0d021ba702e1c59e7832aefd1f623d2da1db8d20e13e994c7ac0eecd3e",
+      "checkpoint_schema_version": 1,
+      "model_config_schema_version": 1,
+      "training_stage": "text_pretrain",
+      "training_mode": "full",
+      "source_manifest": "data\\manifests\\text_pretrain.json",
+      "tokenizer_category": "lpt_model\\glm_tokenizer",
+      "tokenizer_eos_token": "<|endoftext|>",
+      "tokenizer_pad_token": "<|endoftext|>",
+      "chat_template_version": "lpt-native-v1",
+      "model_config_excerpt": {
+        "hidden_size": 512,
+        "num_layers": 16,
+        "num_heads": 8,
+        "num_kv_heads": 2,
+        "head_dim": 64,
+        "original_max_len": 2048,
+        "longrope2_target_length": 32768,
+        "longrope2_factor_max_sequence_length": 9120
+      }
+    },
+    {
+      "label": "DS text_pretrain",
+      "source_checkpoint_path": "artifacts\\lpt_ds_v1\\text_pretrain\\checkpoints\\latest.pth",
+      "file_size_bytes": 478847355,
+      "last_write_time": "2026-04-30T00:58:02",
+      "sha256": "4411c72a9d516c8b02c78e477c8361c03f3729dcbe282ad05f32b17ced506f0d",
+      "checkpoint_schema_version": 1,
+      "model_config_schema_version": 1,
+      "training_stage": "text_pretrain",
+      "training_mode": "full",
+      "source_manifest": "data\\manifests\\text_pretrain.json",
+      "tokenizer_category": "lpt_model\\ds_tokenizer",
+      "tokenizer_eos_token": "<｜end▁of▁sentence｜>",
+      "tokenizer_pad_token": "<｜▁pad▁｜>",
+      "chat_template_version": "lpt-ds-v1",
+      "model_config_excerpt": {
+        "hidden_size": 512,
+        "num_layers": 16,
+        "num_heads": 8,
+        "num_kv_heads": 2,
+        "head_dim": 64,
+        "original_max_len": 2048,
+        "longrope2_target_length": 32768,
+        "longrope2_factor_max_sequence_length": 8771
+      }
+    }
+  ]
+}

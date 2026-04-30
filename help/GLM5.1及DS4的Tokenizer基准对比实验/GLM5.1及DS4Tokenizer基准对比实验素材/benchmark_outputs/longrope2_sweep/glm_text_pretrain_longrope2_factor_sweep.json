@@ -1,0 +1,707 @@
+{
+  "report_type": "longrope2_factor_sweep",
+  "generated_at": "2026-05-01T01:41:52",
+  "checkpoint": {
+    "checkpoint_path": "artifacts\\lpt_native_v1\\text_pretrain\\checkpoints\\latest.pth",
+    "checkpoint_schema_version": 1,
+    "model_config_schema_version": 1,
+    "training_stage": "text_pretrain",
+    "training_mode": "full",
+    "source_manifest": "data\\manifests\\text_pretrain.json",
+    "model_config": {
+      "num_layers": 16,
+      "num_heads": 8,
+      "num_kv_heads": 2,
+      "head_dim": 64,
+      "hidden_size": 512,
+      "cla_share_every_n_layers": 2,
+      "layer_block_types": [
+        "retnet",
+        "attention",
+        "retnet",
+        "attention",
+        "retnet",
+        "attention",
+        "retnet",
+        "attention",
+        "retnet",
+        "attention",
+        "retnet",
+        "attention",
+        "retnet",
+        "attention",
+        "retnet",
+        "attention"
+      ],
+      "layer_state_group_ids": null,
+      "retnet_value_factor": 1,
+      "retnet_gate_fn": "swish",
+      "retnet_chunk_size": 256,
+      "dropout_rate": 0.0,
+      "rope_base": 10000.0,
+      "original_max_len": 2048,
+      "longrope2_target_length": 32768,
+      "longrope2_long_factors": [
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0
+      ],
+      "longrope2_factor_max_sequence_length": 9120,
+      "longrope2_magnitude_scaling_policy": "su",
+      "longrope2_mscale_factors": null,
+      "longrope2_train_embedding_mode": "mixed",
+      "longrope2_inference_embedding_mode": "mixed",
+      "longrope2_mixed_original_window": null
+    },
+    "model_architecture_metadata": {
+      "hidden_size": 512,
+      "num_heads": 8,
+      "num_kv_heads": 2,
+      "head_dim": 64,
+      "num_layers": 16,
+      "cla_share_every_n_layers": 2,
+      "layer_block_types": [
+        "retnet",
+        "attention",
+        "retnet",
+        "attention",
+        "retnet",
+        "attention",
+        "retnet",
+        "attention",
+        "retnet",
+        "attention",
+        "retnet",
+        "attention",
+        "retnet",
+        "attention",
+        "retnet",
+        "attention"
+      ],
+      "layer_state_group_ids": [
+        4,
+        0,
+        5,
+        0,
+        6,
+        1,
+        7,
+        1,
+        8,
+        2,
+        9,
+        2,
+        10,
+        3,
+        11,
+        3
+      ],
+      "retnet_value_factor": 1,
+      "retnet_gate_fn": "swish",
+      "retnet_chunk_size": 256,
+      "rope_base": 10000.0,
+      "original_max_len": 2048,
+      "longrope2_target_length": 32768,
+      "longrope2_long_factors": [
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0
+      ],
+      "longrope2_factor_max_sequence_length": 9120,
+      "longrope2_magnitude_scaling_policy": "su",
+      "longrope2_mscale_factors": null,
+      "longrope2_train_embedding_mode": "mixed",
+      "longrope2_inference_embedding_mode": "mixed",
+      "longrope2_mixed_original_window": null,
+      "num_state_slots": 12
+    },
+    "longrope_factor_summary": {
+      "present": true,
+      "factor_mode": "uniform",
+      "factor_count": 32,
+      "unique_factor_count": 1,
+      "min_factor": 16.0,
+      "max_factor": 16.0,
+      "uniform_factor": 16.0
+    }
+  },
+  "runtime": {
+    "device": "cuda",
+    "cache_strategy": "session_rebuild",
+    "generation_config": {
+      "do_sample": false,
+      "temperature": 0.0,
+      "top_k": 1,
+      "top_p": 1.0,
+      "max_length": 4,
+      "repetition_penalty": 1.0,
+      "repetition_window_size": null
+    },
+    "total_latency_sec": 3.358512
+  },
+  "config": {
+    "model_type": "text_pretrain",
+    "checkpoint_root": "artifacts\\lpt_native_v1\\text_pretrain\\checkpoints\\latest",
+    "lora_base_source": "text_pretrain",
+    "text_manifest_path": ".tmp_glm_benchmarks\\textbooks_1_11_manifest.json",
+    "needle_lengths": [
+      128
+    ],
+    "needle_depths": [
+      0.5
+    ],
+    "retrieval_lengths": [
+      128
+    ],
+    "ppl_lengths": [
+      128
+    ],
+    "ppl_max_windows": 1,
+    "seed": 42,
+    "candidate_count": 2
+  },
+  "candidates": [
+    {
+      "name": "current",
+      "source": "checkpoint:model_config",
+      "factor_max_sequence_length": 9120,
+      "long_factors": [
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0
+      ],
+      "longrope_factor_summary": {
+        "present": true,
+        "factor_mode": "uniform",
+        "factor_count": 32,
+        "unique_factor_count": 1,
+        "min_factor": 16.0,
+        "max_factor": 16.0,
+        "uniform_factor": 16.0
+      },
+      "model_config_overrides": {
+        "longrope2_long_factors": [
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0
+        ],
+        "longrope2_factor_max_sequence_length": 9120
+      },
+      "status": "ok",
+      "tasks": {
+        "needle_in_a_haystack": {
+          "task_name": "needle_in_a_haystack",
+          "aggregate": {
+            "sample_count": 1,
+            "success_count": 1,
+            "error_count": 0,
+            "exact_match_count": 0,
+            "exact_match_rate": 0.0,
+            "average_latency_sec": 0.473626
+          },
+          "samples": [
+            {
+              "task_name": "needle_in_a_haystack",
+              "status": "ok",
+              "input_token_count": 171,
+              "latency_sec": 0.473626,
+              "expected_answer": "NIAH-0042-50",
+              "prediction": "，USERNAMEUSERNAMEUSERNAME",
+              "normalized_expected": "NIAH-0042-50",
+              "normalized_prediction": "USERNAMEUSERNAMEUSERNAME",
+              "exact_match": false,
+              "target_sequence_length": 128,
+              "needle_depth": 0.5
+            }
+          ]
+        },
+        "long_text_ppl": {
+          "task_name": "long_text_ppl",
+          "manifest_path": ".tmp_glm_benchmarks\\textbooks_1_11_manifest.json",
+          "loaded_datasets": [
+            {
+              "name": "textbook_txt_01",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\1--2023版河南省普通高校专升本考试专用教材·动物、植物遗传学_parsed_output.text.jsonl",
+              "count": 25,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_02",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\2--2023年河南省普通高校专升本考试专用教材·经济学（用2022年加印）_parsed_output.text.jsonl",
+              "count": 43,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_03",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\3--2023年广东省普通高校专升本考试专用教材·教育理论_parsed_output.text.jsonl",
+              "count": 28,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_04",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\4--2023年广东省普通高校专升本考试专用教材·英语_parsed_output.text.jsonl",
+              "count": 50,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_05",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\5---2023年广东省普通高校专升本考试专用教材·生理学- 转曲_parsed_output.text.jsonl",
+              "count": 32,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_06",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\6--2023年广东省普通高校专升本考试专用教材·管理学_parsed_output.text.jsonl",
+              "count": 31,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_07",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\7--2023年广东省普通高校专升本考试专用教材·高等数学_parsed_output.text.jsonl",
+              "count": 65,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_08",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\8--2023年广东省普通高校专升本考试专用教材·大学语文_parsed_output.text.jsonl",
+              "count": 38,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_09",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\9--2023年广东省普通高校专升本考试专用教材·艺术概论_parsed_output.text.jsonl",
+              "count": 34,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_10",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\10--2023年广东省普通高校专升本考试专用教材·政治理论_parsed_output.text.jsonl",
+              "count": 36,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_11",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\11--2023年广东省普通高校专升本考试专用教材·民法_parsed_output.text.jsonl",
+              "count": 34,
+              "weight": 1
+            }
+          ],
+          "aggregate": [
+            {
+              "window_size": 128,
+              "window_count": 1,
+              "effective_token_count": 127,
+              "perplexity": 1.5481220489862424e+23
+            }
+          ],
+          "length_results": [
+            {
+              "window_size": 128,
+              "window_count": 1,
+              "effective_token_count": 127,
+              "average_negative_log_likelihood": 53.39649975393701,
+              "perplexity": 1.5481220489862424e+23,
+              "perplexity_overflow": false,
+              "samples": [
+                {
+                  "status": "ok",
+                  "window_index": 1,
+                  "window_size": 128,
+                  "token_count": 127,
+                  "negative_log_likelihood": 6781.35546875,
+                  "latency_sec": 0.204866
+                }
+              ]
+            }
+          ]
+        },
+        "qa_retrieval": {
+          "task_name": "qa_retrieval",
+          "aggregate": {
+            "sample_count": 1,
+            "success_count": 1,
+            "error_count": 0,
+            "exact_match_count": 0,
+            "exact_match_rate": 0.0,
+            "average_latency_sec": 0.20823
+          },
+          "samples": [
+            {
+              "task_name": "qa_retrieval",
+              "status": "ok",
+              "input_token_count": 151,
+              "latency_sec": 0.20823,
+              "expected_answer": "KEY-1042-015",
+              "prediction": "，1.，",
+              "normalized_expected": "KEY-1042-015",
+              "normalized_prediction": "1.",
+              "exact_match": false,
+              "target_sequence_length": 128
+            }
+          ]
+        }
+      },
+      "runtime": {
+        "latency_sec": 1.872555
+      }
+    },
+    {
+      "name": "bootstrap",
+      "source": "bootstrap:sequence_length=9120",
+      "factor_max_sequence_length": 9120,
+      "long_factors": [
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0,
+        16.0
+      ],
+      "longrope_factor_summary": {
+        "present": true,
+        "factor_mode": "uniform",
+        "factor_count": 32,
+        "unique_factor_count": 1,
+        "min_factor": 16.0,
+        "max_factor": 16.0,
+        "uniform_factor": 16.0
+      },
+      "model_config_overrides": {
+        "longrope2_long_factors": [
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0,
+          16.0
+        ],
+        "longrope2_factor_max_sequence_length": 9120
+      },
+      "status": "ok",
+      "tasks": {
+        "needle_in_a_haystack": {
+          "task_name": "needle_in_a_haystack",
+          "aggregate": {
+            "sample_count": 1,
+            "success_count": 1,
+            "error_count": 0,
+            "exact_match_count": 0,
+            "exact_match_rate": 0.0,
+            "average_latency_sec": 0.112905
+          },
+          "samples": [
+            {
+              "task_name": "needle_in_a_haystack",
+              "status": "ok",
+              "input_token_count": 171,
+              "latency_sec": 0.112905,
+              "expected_answer": "NIAH-0042-50",
+              "prediction": "，USERNAMEUSERNAMEUSERNAME",
+              "normalized_expected": "NIAH-0042-50",
+              "normalized_prediction": "USERNAMEUSERNAMEUSERNAME",
+              "exact_match": false,
+              "target_sequence_length": 128,
+              "needle_depth": 0.5
+            }
+          ]
+        },
+        "long_text_ppl": {
+          "task_name": "long_text_ppl",
+          "manifest_path": ".tmp_glm_benchmarks\\textbooks_1_11_manifest.json",
+          "loaded_datasets": [
+            {
+              "name": "textbook_txt_01",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\1--2023版河南省普通高校专升本考试专用教材·动物、植物遗传学_parsed_output.text.jsonl",
+              "count": 25,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_02",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\2--2023年河南省普通高校专升本考试专用教材·经济学（用2022年加印）_parsed_output.text.jsonl",
+              "count": 43,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_03",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\3--2023年广东省普通高校专升本考试专用教材·教育理论_parsed_output.text.jsonl",
+              "count": 28,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_04",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\4--2023年广东省普通高校专升本考试专用教材·英语_parsed_output.text.jsonl",
+              "count": 50,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_05",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\5---2023年广东省普通高校专升本考试专用教材·生理学- 转曲_parsed_output.text.jsonl",
+              "count": 32,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_06",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\6--2023年广东省普通高校专升本考试专用教材·管理学_parsed_output.text.jsonl",
+              "count": 31,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_07",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\7--2023年广东省普通高校专升本考试专用教材·高等数学_parsed_output.text.jsonl",
+              "count": 65,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_08",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\8--2023年广东省普通高校专升本考试专用教材·大学语文_parsed_output.text.jsonl",
+              "count": 38,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_09",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\9--2023年广东省普通高校专升本考试专用教材·艺术概论_parsed_output.text.jsonl",
+              "count": 34,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_10",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\10--2023年广东省普通高校专升本考试专用教材·政治理论_parsed_output.text.jsonl",
+              "count": 36,
+              "weight": 1
+            },
+            {
+              "name": "textbook_txt_11",
+              "path": ".tmp_glm_benchmarks\\..\\..\\data\\structured\\11--2023年广东省普通高校专升本考试专用教材·民法_parsed_output.text.jsonl",
+              "count": 34,
+              "weight": 1
+            }
+          ],
+          "aggregate": [
+            {
+              "window_size": 128,
+              "window_count": 1,
+              "effective_token_count": 127,
+              "perplexity": 1.5481220489862424e+23
+            }
+          ],
+          "length_results": [
+            {
+              "window_size": 128,
+              "window_count": 1,
+              "effective_token_count": 127,
+              "average_negative_log_likelihood": 53.39649975393701,
+              "perplexity": 1.5481220489862424e+23,
+              "perplexity_overflow": false,
+              "samples": [
+                {
+                  "status": "ok",
+                  "window_index": 1,
+                  "window_size": 128,
+                  "token_count": 127,
+                  "negative_log_likelihood": 6781.35546875,
+                  "latency_sec": 0.170203
+                }
+              ]
+            }
+          ]
+        },
+        "qa_retrieval": {
+          "task_name": "qa_retrieval",
+          "aggregate": {
+            "sample_count": 1,
+            "success_count": 1,
+            "error_count": 0,
+            "exact_match_count": 0,
+            "exact_match_rate": 0.0,
+            "average_latency_sec": 0.204467
+          },
+          "samples": [
+            {
+              "task_name": "qa_retrieval",
+              "status": "ok",
+              "input_token_count": 151,
+              "latency_sec": 0.204467,
+              "expected_answer": "KEY-1042-015",
+              "prediction": "，1.，",
+              "normalized_expected": "KEY-1042-015",
+              "normalized_prediction": "1.",
+              "exact_match": false,
+              "target_sequence_length": 128
+            }
+          ]
+        }
+      },
+      "runtime": {
+        "latency_sec": 1.485321
+      }
+    }
+  ]
+}

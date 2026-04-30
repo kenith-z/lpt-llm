@@ -1,0 +1,50 @@
+{
+  "config": {
+    "batch_size": 1,
+    "warmup_steps": 5,
+    "measured_steps": 40,
+    "packing_mode": "off",
+    "train_max_sequence_length": 7680,
+    "train_rope_cache_max_sequence_length": 7680,
+    "inference_rope_cache_max_sequence_length": 32768
+  },
+  "tokenizer": {
+    "tokenizer_path": "lpt_model\\ds_tokenizer",
+    "tokenizer_name_or_path": "lpt_model\\ds_tokenizer",
+    "tokenizer_config_sha256": "789e16a9396dc44a7d0eaf8627dbfdfd9f583f49ec82ff543ecc6a1a11dc8049",
+    "vocab_size": 129280,
+    "bos_token": "<｜begin▁of▁sentence｜>",
+    "bos_token_id": 0,
+    "eos_token": "<｜end▁of▁sentence｜>",
+    "eos_token_id": 1,
+    "pad_token": "<｜▁pad▁｜>",
+    "pad_token_id": 2,
+    "special_tokens_map": {
+      "bos_token": "<｜begin▁of▁sentence｜>",
+      "eos_token": "<｜end▁of▁sentence｜>",
+      "pad_token": "<｜▁pad▁｜>"
+    }
+  },
+  "benchmark": [
+    {
+      "sequence_packing_enabled": false,
+      "warmup_steps": 5,
+      "measured_steps": 40,
+      "batch_size": 1,
+      "raw_samples": 40,
+      "packed_rows": 40,
+      "active_tokens": 206949,
+      "padded_tokens": 207112,
+      "token_utilization": 0.999213,
+      "wall_clock_seconds": 284.080749,
+      "avg_step_ms": 7102.019,
+      "active_tokens_per_sec": 728.487,
+      "padded_tokens_per_sec": 729.06,
+      "raw_samples_per_sec": 0.141,
+      "peak_memory_allocated_gb": 14.265,
+      "peak_memory_reserved_gb": 29.766,
+      "device_name": "NVIDIA GeForce RTX 5060 Ti",
+      "manifest_path": ".tmp_ds_benchmarks\\textbooks_1_11_manifest.json"
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "datasets": [
+    {
+      "name": "textbook_txt_01",
+      "path": "../../data/structured/1--2023版河南省普通高校专升本考试专用教材·动物、植物遗传学_parsed_output.text.jsonl",
+      "weight": 1
+    },
+    {
+      "name": "textbook_txt_02",
+      "path": "../../data/structured/2--2023年河南省普通高校专升本考试专用教材·经济学（用2022年加印）_parsed_output.text.jsonl",
+      "weight": 1
+    },
+    {
+      "name": "textbook_txt_03",
+      "path": "../../data/structured/3--2023年广东省普通高校专升本考试专用教材·教育理论_parsed_output.text.jsonl",
+      "weight": 1
+    },
+    {
+      "name": "textbook_txt_04",
+      "path": "../../data/structured/4--2023年广东省普通高校专升本考试专用教材·英语_parsed_output.text.jsonl",
+      "weight": 1
+    },
+    {
+      "name": "textbook_txt_05",
+      "path": "../../data/structured/5---2023年广东省普通高校专升本考试专用教材·生理学- 转曲_parsed_output.text.jsonl",
+      "weight": 1
+    },
+    {
+      "name": "textbook_txt_06",
+      "path": "../../data/structured/6--2023年广东省普通高校专升本考试专用教材·管理学_parsed_output.text.jsonl",
+      "weight": 1
+    },
+    {
+      "name": "textbook_txt_07",
+      "path": "../../data/structured/7--2023年广东省普通高校专升本考试专用教材·高等数学_parsed_output.text.jsonl",
+      "weight": 1
+    },
+    {
+      "name": "textbook_txt_08",
+      "path": "../../data/structured/8--2023年广东省普通高校专升本考试专用教材·大学语文_parsed_output.text.jsonl",
+      "weight": 1
+    },
+    {
+      "name": "textbook_txt_09",
+      "path": "../../data/structured/9--2023年广东省普通高校专升本考试专用教材·艺术概论_parsed_output.text.jsonl",
+      "weight": 1
+    },
+    {
+      "name": "textbook_txt_10",
+      "path": "../../data/structured/10--2023年广东省普通高校专升本考试专用教材·政治理论_parsed_output.text.jsonl",
+      "weight": 1
+    },
+    {
+      "name": "textbook_txt_11",
+      "path": "../../data/structured/11--2023年广东省普通高校专升本考试专用教材·民法_parsed_output.text.jsonl",
+      "weight": 1
+    }
+  ]
+}

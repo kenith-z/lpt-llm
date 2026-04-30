@@ -1,0 +1,192 @@
+[
+  {
+    "relative_path": "benchmark_outputs\\longrope2_sweep\\ds_text_pretrain_longrope2_factor_sweep.json",
+    "size_bytes": 21618,
+    "last_write_time": "2026-05-01T01:42:21"
+  },
+  {
+    "relative_path": "benchmark_outputs\\longrope2_sweep\\ds_text_pretrain_longrope2_factor_sweep.md",
+    "size_bytes": 912,
+    "last_write_time": "2026-05-01T01:42:21"
+  },
+  {
+    "relative_path": "benchmark_outputs\\longrope2_sweep\\glm_text_pretrain_longrope2_factor_sweep.json",
+    "size_bytes": 20898,
+    "last_write_time": "2026-05-01T01:41:55"
+  },
+  {
+    "relative_path": "benchmark_outputs\\longrope2_sweep\\glm_text_pretrain_longrope2_factor_sweep.md",
+    "size_bytes": 736,
+    "last_write_time": "2026-05-01T01:41:55"
+  },
+  {
+    "relative_path": "benchmark_outputs\\sequence_packing\\sequence_packing_ds_textbooks_1_11_bs1_trainlen7680_off.json",
+    "size_bytes": 1637,
+    "last_write_time": "2026-05-01T00:42:13"
+  },
+  {
+    "relative_path": "benchmark_outputs\\sequence_packing\\sequence_packing_ds_textbooks_1_11_bs4_trainlen768.json",
+    "size_bytes": 2469,
+    "last_write_time": "2026-05-01T00:31:48"
+  },
+  {
+    "relative_path": "benchmark_outputs\\sequence_packing\\sequence_packing_glm_textbooks_1_11_bs1_trainlen7680_off.json",
+    "size_bytes": 988,
+    "last_write_time": "2026-05-01T00:51:21"
+  },
+  {
+    "relative_path": "benchmark_outputs\\sequence_packing\\sequence_packing_glm_textbooks_1_11_bs4_trainlen768.json",
+    "size_bytes": 1821,
+    "last_write_time": "2026-05-01T00:44:40"
+  },
+  {
+    "relative_path": "checkpoint_metadata\\text_pretrain_checkpoint_summary.json",
+    "size_bytes": 2297,
+    "last_write_time": "2026-05-01T01:47:29"
+  },
+  {
+    "relative_path": "data\\textbooks_1_11\\1--2023版河南省普通高校专升本考试专用教材·动物、植物遗传学_parsed_output.text.jsonl",
+    "size_bytes": 590090,
+    "last_write_time": "2026-04-26T11:54:42"
+  },
+  {
+    "relative_path": "data\\textbooks_1_11\\10--2023年广东省普通高校专升本考试专用教材·政治理论_parsed_output.text.jsonl",
+    "size_bytes": 1064118,
+    "last_write_time": "2026-04-26T11:54:48"
+  },
+  {
+    "relative_path": "data\\textbooks_1_11\\11--2023年广东省普通高校专升本考试专用教材·民法_parsed_output.text.jsonl",
+    "size_bytes": 979770,
+    "last_write_time": "2026-04-26T11:54:54"
+  },
+  {
+    "relative_path": "data\\textbooks_1_11\\2--2023年河南省普通高校专升本考试专用教材·经济学（用2022年加印）_parsed_output.text.jsonl",
+    "size_bytes": 1146170,
+    "last_write_time": "2026-04-26T11:55:01"
+  },
+  {
+    "relative_path": "data\\textbooks_1_11\\3--2023年广东省普通高校专升本考试专用教材·教育理论_parsed_output.text.jsonl",
+    "size_bytes": 783420,
+    "last_write_time": "2026-04-26T11:55:07"
+  },
+  {
+    "relative_path": "data\\textbooks_1_11\\4--2023年广东省普通高校专升本考试专用教材·英语_parsed_output.text.jsonl",
+    "size_bytes": 826254,
+    "last_write_time": "2026-04-26T11:55:12"
+  },
+  {
+    "relative_path": "data\\textbooks_1_11\\5---2023年广东省普通高校专升本考试专用教材·生理学- 转曲_parsed_output.text.jsonl",
+    "size_bytes": 803192,
+    "last_write_time": "2026-04-26T11:55:18"
+  },
+  {
+    "relative_path": "data\\textbooks_1_11\\6--2023年广东省普通高校专升本考试专用教材·管理学_parsed_output.text.jsonl",
+    "size_bytes": 891855,
+    "last_write_time": "2026-04-26T11:55:24"
+  },
+  {
+    "relative_path": "data\\textbooks_1_11\\7--2023年广东省普通高校专升本考试专用教材·高等数学_parsed_output.text.jsonl",
+    "size_bytes": 904829,
+    "last_write_time": "2026-04-26T11:55:30"
+  },
+  {
+    "relative_path": "data\\textbooks_1_11\\8--2023年广东省普通高校专升本考试专用教材·大学语文_parsed_output.text.jsonl",
+    "size_bytes": 1056832,
+    "last_write_time": "2026-04-26T11:55:36"
+  },
+  {
+    "relative_path": "data\\textbooks_1_11\\9--2023年广东省普通高校专升本考试专用教材·艺术概论_parsed_output.text.jsonl",
+    "size_bytes": 992556,
+    "last_write_time": "2026-04-26T11:55:42"
+  },
+  {
+    "relative_path": "final_documents\\GLM5.1及DS4Tokenizer基准对比实验报告.md",
+    "size_bytes": 12340,
+    "last_write_time": "2026-05-01T01:49:49"
+  },
+  {
+    "relative_path": "final_documents\\GLM5.1及DS4Tokenizer基准对比实验附录.md",
+    "size_bytes": 9180,
+    "last_write_time": "2026-05-01T01:51:27"
+  },
+  {
+    "relative_path": "manifests\\ds_textbooks_1_11_manifest.json",
+    "size_bytes": 2225,
+    "last_write_time": "2026-05-01T00:20:04"
+  },
+  {
+    "relative_path": "manifests\\glm_textbooks_1_11_manifest.json",
+    "size_bytes": 2258,
+    "last_write_time": "2026-05-01T00:20:33"
+  },
+  {
+    "relative_path": "material_file_manifest.json",
+    "size_bytes": 7120,
+    "last_write_time": "2026-05-01T01:51:12"
+  },
+  {
+    "relative_path": "scripts\\current_ds\\benchmark_sequence_packing.py",
+    "size_bytes": 13034,
+    "last_write_time": "2026-04-30T22:58:09"
+  },
+  {
+    "relative_path": "scripts\\current_ds\\common.py",
+    "size_bytes": 13215,
+    "last_write_time": "2026-04-30T22:57:16"
+  },
+  {
+    "relative_path": "scripts\\current_ds\\evaluate_longrope2_factor_sweep.py",
+    "size_bytes": 6917,
+    "last_write_time": "2026-04-30T23:45:49"
+  },
+  {
+    "relative_path": "scripts\\current_ds\\longrope2_factor_sweep.py",
+    "size_bytes": 18802,
+    "last_write_time": "2026-04-30T23:03:12"
+  },
+  {
+    "relative_path": "scripts\\current_ds\\test_tokenizer_jsonl_token_counts.py",
+    "size_bytes": 5730,
+    "last_write_time": "2026-04-29T22:39:41"
+  },
+  {
+    "relative_path": "scripts\\glm5_1\\benchmark_sequence_packing.py",
+    "size_bytes": 13279,
+    "last_write_time": "2026-05-01T00:02:26"
+  },
+  {
+    "relative_path": "scripts\\glm5_1\\common.py",
+    "size_bytes": 11896,
+    "last_write_time": "2026-05-01T00:00:28"
+  },
+  {
+    "relative_path": "scripts\\glm5_1\\evaluate_longrope2_factor_sweep.py",
+    "size_bytes": 7118,
+    "last_write_time": "2026-05-01T00:02:26"
+  },
+  {
+    "relative_path": "scripts\\glm5_1\\longrope2_factor_sweep.py",
+    "size_bytes": 18259,
+    "last_write_time": "2026-05-01T00:02:25"
+  },
+  {
+    "relative_path": "source_reports\\20260429Tokenizer切换基准实验报告.md",
+    "size_bytes": 11307,
+    "last_write_time": "2026-04-29T23:02:39"
+  },
+  {
+    "relative_path": "source_reports\\20260501Tokenizer切换同源1-11基准对比实验报告.md",
+    "size_bytes": 8838,
+    "last_write_time": "2026-05-01T01:08:46"
+  },
+  {
+    "relative_path": "tokenizer_metadata\\ds_tokenizer\\tokenizer_config.json",
+    "size_bytes": 819,
+    "last_write_time": "2026-04-29T21:44:20"
+  },
+  {
+    "relative_path": "tokenizer_metadata\\glm_tokenizer\\tokenizer_config.json",
+    "size_bytes": 794,
+    "last_write_time": "2026-05-01T00:02:25"
+  }
+]

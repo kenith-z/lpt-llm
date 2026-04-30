@@ -1,0 +1,33 @@
+{
+  "config": {
+    "batch_size": 1,
+    "warmup_steps": 5,
+    "measured_steps": 40,
+    "packing_mode": "off",
+    "train_max_sequence_length": 7680,
+    "train_rope_cache_max_sequence_length": 7680,
+    "inference_rope_cache_max_sequence_length": 32768
+  },
+  "benchmark": [
+    {
+      "sequence_packing_enabled": false,
+      "warmup_steps": 5,
+      "measured_steps": 40,
+      "batch_size": 1,
+      "raw_samples": 40,
+      "packed_rows": 40,
+      "active_tokens": 220056,
+      "padded_tokens": 220192,
+      "token_utilization": 0.999382,
+      "wall_clock_seconds": 306.885393,
+      "avg_step_ms": 7672.135,
+      "active_tokens_per_sec": 717.062,
+      "padded_tokens_per_sec": 717.506,
+      "raw_samples_per_sec": 0.13,
+      "peak_memory_allocated_gb": 17.118,
+      "peak_memory_reserved_gb": 23.631,
+      "device_name": "NVIDIA GeForce RTX 5060 Ti",
+      "manifest_path": ".tmp_glm_benchmarks\\textbooks_1_11_manifest.json"
+    }
+  ]
+}

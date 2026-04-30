@@ -1,0 +1,75 @@
+{
+  "config": {
+    "batch_size": 4,
+    "warmup_steps": 5,
+    "measured_steps": 40,
+    "packing_mode": "both",
+    "train_max_sequence_length": 768,
+    "train_rope_cache_max_sequence_length": 768,
+    "inference_rope_cache_max_sequence_length": 32768
+  },
+  "tokenizer": {
+    "tokenizer_path": "lpt_model\\ds_tokenizer",
+    "tokenizer_name_or_path": "lpt_model\\ds_tokenizer",
+    "tokenizer_config_sha256": "789e16a9396dc44a7d0eaf8627dbfdfd9f583f49ec82ff543ecc6a1a11dc8049",
+    "vocab_size": 129280,
+    "bos_token": "<｜begin▁of▁sentence｜>",
+    "bos_token_id": 0,
+    "eos_token": "<｜end▁of▁sentence｜>",
+    "eos_token_id": 1,
+    "pad_token": "<｜▁pad▁｜>",
+    "pad_token_id": 2,
+    "special_tokens_map": {
+      "bos_token": "<｜begin▁of▁sentence｜>",
+      "eos_token": "<｜end▁of▁sentence｜>",
+      "pad_token": "<｜▁pad▁｜>"
+    }
+  },
+  "benchmark": [
+    {
+      "sequence_packing_enabled": false,
+      "warmup_steps": 5,
+      "measured_steps": 40,
+      "batch_size": 4,
+      "raw_samples": 160,
+      "packed_rows": 160,
+      "active_tokens": 122353,
+      "padded_tokens": 122880,
+      "token_utilization": 0.995711,
+      "wall_clock_seconds": 27.810324,
+      "avg_step_ms": 695.258,
+      "active_tokens_per_sec": 4399.553,
+      "padded_tokens_per_sec": 4418.503,
+      "raw_samples_per_sec": 5.753,
+      "peak_memory_allocated_gb": 7.511,
+      "peak_memory_reserved_gb": 10.066,
+      "device_name": "NVIDIA GeForce RTX 5060 Ti",
+      "manifest_path": ".tmp_ds_benchmarks\\textbooks_1_11_manifest.json"
+    },
+    {
+      "sequence_packing_enabled": true,
+      "warmup_steps": 5,
+      "measured_steps": 40,
+      "batch_size": 4,
+      "raw_samples": 160,
+      "packed_rows": 160,
+      "active_tokens": 122353,
+      "padded_tokens": 122880,
+      "token_utilization": 0.995711,
+      "wall_clock_seconds": 26.938143,
+      "avg_step_ms": 673.454,
+      "active_tokens_per_sec": 4541.998,
+      "padded_tokens_per_sec": 4561.562,
+      "raw_samples_per_sec": 5.94,
+      "peak_memory_allocated_gb": 7.508,
+      "peak_memory_reserved_gb": 8.703,
+      "device_name": "NVIDIA GeForce RTX 5060 Ti",
+      "manifest_path": ".tmp_ds_benchmarks\\textbooks_1_11_manifest.json"
+    }
+  ],
+  "comparison": {
+    "active_tokens_per_sec_speedup": 1.0324,
+    "token_utilization_gain": 0.0,
+    "wall_clock_ratio": 1.0324
+  }
+}
