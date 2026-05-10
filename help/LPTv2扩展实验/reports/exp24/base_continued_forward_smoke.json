@@ -1,0 +1,44 @@
+{
+  "report_type": "lpt_v2_forward_smoke",
+  "checkpoint_path": "artifacts\\lpt_v2\\experiments_exp24\\base_continued\\checkpoints\\latest\\model.pt",
+  "device": "cuda:0",
+  "dtype": "float16",
+  "batch_size": 1,
+  "sequence_length": 32,
+  "use_kv_cache": false,
+  "metrics": {
+    "forward_ok": true,
+    "logits_finite": true,
+    "logits_shape": [
+      1,
+      32,
+      129280
+    ],
+    "expected_logits_shape": [
+      1,
+      32,
+      129280
+    ],
+    "loss": 11.769736289978027,
+    "ppl": 129280.05380933422,
+    "state_count": 24,
+    "attention_state_count": 0,
+    "retnet_state_count": 24,
+    "xlstm_state_count": 0,
+    "expected_xlstm_state_count": 0,
+    "paged_kv_page_count": 0,
+    "model_size_preset": "lpt_v2_small_base",
+    "retnet_assist_mode": "q_adapter",
+    "retnet_adapter_target": [
+      "q"
+    ],
+    "retnet_k_adapter_enabled": false,
+    "retnet_summary_norm_mean": 10.360932489236196,
+    "retnet_q_adapter_delta_norm_mean": 4.2900486178696156,
+    "retnet_k_adapter_delta_norm_mean": 0.0,
+    "retnet_alpha_q_mean": 0.0028260101874669394,
+    "retnet_alpha_k_mean": 0.0,
+    "xlstm_memory_layers": "disabled",
+    "xlstm_memory_selected_layers": []
+  }
+}

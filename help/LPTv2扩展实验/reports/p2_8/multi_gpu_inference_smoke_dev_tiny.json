@@ -1,0 +1,215 @@
+{
+  "report_type": "lpt_v2_p2_8_multi_gpu_inference_smoke",
+  "success": true,
+  "checkpoint_path": null,
+  "profile": "lpt_v2_assist",
+  "preset": "lpt_v2_dev_tiny",
+  "dtype": "float16",
+  "prompt_length": 96,
+  "max_new_tokens": 2,
+  "generated_token_ids": [
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51,
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66,
+    67,
+    68,
+    69,
+    70,
+    71,
+    72,
+    73,
+    74,
+    75,
+    76,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82,
+    83,
+    84,
+    85,
+    86,
+    87,
+    88,
+    89,
+    90,
+    91,
+    92,
+    93,
+    94,
+    95,
+    96,
+    97,
+    98,
+    99,
+    100,
+    101,
+    102,
+    103,
+    104,
+    105,
+    106,
+    107,
+    108,
+    109,
+    110,
+    111,
+    112,
+    113,
+    113,
+    113
+  ],
+  "execution_plan": {
+    "mode": "model_parallel",
+    "primary_device": "cuda:0",
+    "visible_cuda_devices": [
+      {
+        "logical_index": 0,
+        "logical_name": "cuda:0",
+        "visible_device": "0",
+        "name": "NVIDIA GeForce RTX 4060 Ti",
+        "total_memory_bytes": 17175150592
+      },
+      {
+        "logical_index": 1,
+        "logical_name": "cuda:1",
+        "visible_device": "1",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "total_memory_bytes": 17102864384
+      }
+    ],
+    "layer_devices": [
+      "cuda:0",
+      "cuda:1",
+      "cuda:0",
+      "cuda:1"
+    ],
+    "module_devices": {
+      "embedding": "cuda:0",
+      "lm_head": "cuda:0",
+      "final_norm": "cuda:0",
+      "shared_retnet_assist": "cuda:0"
+    },
+    "source": "auto",
+    "warnings": [],
+    "layer_costs_bytes": [
+      3119240,
+      3119240,
+      3119240,
+      3119240
+    ],
+    "module_costs_bytes": {
+      "embedding": 65536,
+      "lm_head": 0,
+      "final_norm": 512,
+      "shared_retnet_assist": 40960
+    },
+    "device_estimated_bytes": {
+      "cuda:0": 6345488,
+      "cuda:1": 6238480
+    }
+  },
+  "visible_cuda_devices": [
+    {
+      "logical_index": 0,
+      "logical_name": "cuda:0",
+      "visible_device": "0",
+      "name": "NVIDIA GeForce RTX 4060 Ti",
+      "total_memory_bytes": 17175150592
+    },
+    {
+      "logical_index": 1,
+      "logical_name": "cuda:1",
+      "visible_device": "1",
+      "name": "NVIDIA GeForce RTX 5060 Ti",
+      "total_memory_bytes": 17102864384
+    }
+  ],
+  "metrics": {
+    "prefill_seconds": 0.8515378000010969,
+    "prefill_tokens_per_sec": 112.73721495378871,
+    "decode_seconds": 0.0817362999987381,
+    "decode_tokens_per_sec": 24.46893240862233,
+    "first_decode_ms": 64.03159999899799,
+    "logits_shape": [
+      1,
+      1,
+      128
+    ],
+    "logits_finite": true,
+    "layer_state_count": 4,
+    "state_counts": {
+      "attention": 4,
+      "retnet": 4,
+      "xlstm": 0,
+      "moe": 4
+    },
+    "state_tensor_device_counts": {
+      "cuda:0": 2,
+      "cuda:1": 2
+    },
+    "paged_kv_allocated_page_count": 4,
+    "cuda_memory": [
+      {
+        "logical_device": "cuda:0",
+        "allocated_bytes": 14321664,
+        "reserved_bytes": 29360128,
+        "max_allocated_bytes": 14882816
+      },
+      {
+        "logical_device": "cuda:1",
+        "allocated_bytes": 14296064,
+        "reserved_bytes": 29360128,
+        "max_allocated_bytes": 14844416
+      }
+    ]
+  }
+}

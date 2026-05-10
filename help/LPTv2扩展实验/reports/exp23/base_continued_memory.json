@@ -1,0 +1,49 @@
+{
+  "report_type": "lpt_v2_xlstm_memory",
+  "preset": "lpt_v2_small_base",
+  "device": "cuda:0",
+  "dtype": "bfloat16",
+  "vocabulary_size": 129280,
+  "sequence_length": 8,
+  "metrics": {
+    "prefill_token_count": null,
+    "decode_token_count": null,
+    "decay_count": null,
+    "boundary_reset_count": null,
+    "special_token_reset_count": null,
+    "special_token_reset_configured": false,
+    "special_token_reset_ready": false,
+    "session_reset_count": null,
+    "effective_beta": 0.0,
+    "memory_norm": 0.0,
+    "adapter_delta_norm": 0.0,
+    "memory_vs_eval_switch_logit_delta_l2": 0.0,
+    "router_entropy": 1.6786521673202515,
+    "pool_metadata": {
+      "num_layers": 24,
+      "request_count": 1,
+      "state_count": 0,
+      "requests": {
+        "memory-report": {
+          "request_id": "memory-report",
+          "phase": "decode",
+          "token_count": 0,
+          "state_count": 0,
+          "update_count": 5,
+          "preempt_count": 0,
+          "decay_count": 0,
+          "reset_count": 0,
+          "released": false,
+          "release_reason": null,
+          "created_at": 1778083841.195273,
+          "updated_at": 1778083841.6519825
+        }
+      }
+    },
+    "eval_switch_state_token_count": null,
+    "decision": {
+      "status": "close_or_debug",
+      "reason": "xLSTMAssist 机制观测未全部通过，应检查状态池、reset 触发或 adapter。"
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "report_type": "lpt_v2_xlstm_memory",
+  "preset": "lpt_v2_small_base",
+  "device": "cuda:0",
+  "dtype": "bfloat16",
+  "vocabulary_size": 129280,
+  "sequence_length": 8,
+  "metrics": {
+    "prefill_token_count": 8,
+    "decode_token_count": 9,
+    "decay_count": 0,
+    "boundary_reset_count": 1,
+    "special_token_reset_count": 1,
+    "special_token_reset_configured": false,
+    "special_token_reset_ready": true,
+    "session_reset_count": 2,
+    "effective_beta": 0.00010027947428170592,
+    "memory_norm": 3.7752461433410645,
+    "adapter_delta_norm": 3.572319746017456,
+    "memory_vs_eval_switch_logit_delta_l2": 0.0186003465205431,
+    "router_entropy": 1.6513147354125977,
+    "pool_metadata": {
+      "num_layers": 24,
+      "request_count": 1,
+      "state_count": 6,
+      "requests": {
+        "memory-report": {
+          "request_id": "memory-report",
+          "phase": "decode",
+          "token_count": 12,
+          "state_count": 6,
+          "update_count": 5,
+          "preempt_count": 0,
+          "decay_count": 0,
+          "reset_count": 2,
+          "released": false,
+          "release_reason": null,
+          "created_at": 1778084000.2518125,
+          "updated_at": 1778084000.7869713
+        }
+      }
+    },
+    "eval_switch_state_token_count": 8,
+    "decision": {
+      "status": "admit_instrumentation_only",
+      "reason": "xLSTMAssist 状态连续性、boundary/session reset 和输入 adapter 均形成可观测机制；当前配置未启用 special token reset，不将该项作为失败条件。"
+    }
+  }
+}

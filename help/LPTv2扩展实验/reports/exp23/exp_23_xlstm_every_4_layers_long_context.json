@@ -1,0 +1,71 @@
+{
+  "report_type": "lpt_v2_long_context_admission",
+  "preset": "checkpoint",
+  "device": "cuda:0",
+  "dtype": "bfloat16",
+  "vocabulary_size": 129280,
+  "sequence_length": 2052,
+  "attention_window_size": 2048,
+  "metrics": {
+    "needle": {
+      "target_token_id": 129277,
+      "assist_rank": 30211,
+      "no_assist_rank": null,
+      "rank_delta": null,
+      "assist_logprob": -26.93041229248047,
+      "no_assist_logprob": null,
+      "logprob_delta": null
+    },
+    "long_text_ppl": {
+      "assist_loss": 46.642093658447266,
+      "no_assist_loss": null,
+      "assist_ppl": 485165195.4097903,
+      "no_assist_ppl": null,
+      "relative_delta": null
+    },
+    "qa_retrieval": {
+      "proxy": "needle_rank",
+      "assist_reciprocal_rank": 3.3100526298368146e-05,
+      "no_assist_reciprocal_rank": null
+    },
+    "code_math": {
+      "proxy": "deterministic_pattern_next_token_loss",
+      "assist_loss": 46.766815185546875,
+      "no_assist_loss": null
+    },
+    "format_following": {
+      "proxy": "structured_pattern_next_token_loss",
+      "assist_loss": 46.86372756958008,
+      "no_assist_loss": null
+    },
+    "mechanism": {
+      "assist_retnet_token_count": 2048,
+      "paged_kv_window_token_count": 2048,
+      "mechanism_ready": false
+    },
+    "quality_decision": {
+      "status": "close_or_debug",
+      "reason": "checkpoint 可加载但长上下文状态未跨越局部窗口，应检查配置或输入长度。"
+    }
+  },
+  "checkpoint_path": "artifacts\\lpt_v2\\experiments_exp23\\exp_23_xlstm_every_4_layers\\checkpoints\\latest\\model.pt",
+  "checkpoint_metadata": {
+    "checkpoint_format": "lpt_v2_checkpoint",
+    "checkpoint_schema_version": 2,
+    "architecture_version": "lpt_v2",
+    "model_config_schema_version": 2,
+    "training_stage": "exp_23_xlstm_every_4_layers",
+    "run_id": "exp23_xlstm_every_4_layers",
+    "global_step": 1164,
+    "optimizer_step": 1164,
+    "tokens_seen": 435335,
+    "source_manifest": "data\\manifests\\chat_sft.json",
+    "eval_manifest": "data\\manifests\\chat_sft_eval_exp23.json",
+    "tokenizer_metadata": {
+      "tokenizer_path": "F:\\yuan\\pyPro\\moe_llm\\lpt_model\\ds_tokenizer",
+      "tokenizer_config_sha256": "e4e7a46cd993c8e7f2422f868c87b41ad16c4ef270ec1417199d4414aff0549b",
+      "vocab_size": 129280,
+      "chat_template_version": "lpt-ds-v1"
+    }
+  }
+}

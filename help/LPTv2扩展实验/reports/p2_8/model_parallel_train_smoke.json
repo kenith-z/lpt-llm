@@ -1,0 +1,107 @@
+{
+  "report_type": "lpt_v2_p2_8_model_parallel_train_smoke",
+  "success": true,
+  "checkpoint_path": null,
+  "profile": "lpt_v2_assist",
+  "preset": "lpt_v2_dev_tiny",
+  "dtype": "float16",
+  "batch_size": 1,
+  "sequence_length": 16,
+  "steps": 1,
+  "execution_plan": {
+    "mode": "model_parallel",
+    "primary_device": "cuda:0",
+    "visible_cuda_devices": [
+      {
+        "logical_index": 0,
+        "logical_name": "cuda:0",
+        "visible_device": "0",
+        "name": "NVIDIA GeForce RTX 4060 Ti",
+        "total_memory_bytes": 17175150592
+      },
+      {
+        "logical_index": 1,
+        "logical_name": "cuda:1",
+        "visible_device": "1",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "total_memory_bytes": 17102864384
+      }
+    ],
+    "layer_devices": [
+      "cuda:0",
+      "cuda:1",
+      "cuda:0",
+      "cuda:1"
+    ],
+    "module_devices": {
+      "embedding": "cuda:0",
+      "lm_head": "cuda:0",
+      "final_norm": "cuda:0",
+      "shared_retnet_assist": "cuda:0"
+    },
+    "source": "auto",
+    "warnings": [],
+    "layer_costs_bytes": [
+      11477024,
+      11477024,
+      11477024,
+      11477024
+    ],
+    "module_costs_bytes": {
+      "embedding": 262144,
+      "lm_head": 0,
+      "final_norm": 2048,
+      "shared_retnet_assist": 163840
+    },
+    "device_estimated_bytes": {
+      "cuda:0": 23382080,
+      "cuda:1": 22954048
+    }
+  },
+  "visible_cuda_devices": [
+    {
+      "logical_index": 0,
+      "logical_name": "cuda:0",
+      "visible_device": "0",
+      "name": "NVIDIA GeForce RTX 4060 Ti",
+      "total_memory_bytes": 17175150592
+    },
+    {
+      "logical_index": 1,
+      "logical_name": "cuda:1",
+      "visible_device": "1",
+      "name": "NVIDIA GeForce RTX 5060 Ti",
+      "total_memory_bytes": 17102864384
+    }
+  ],
+  "metrics": {
+    "losses": [
+      248.88763427734375
+    ],
+    "last_loss": 248.88763427734375,
+    "grad_norm": 93.16970421494646,
+    "elapsed_seconds": 0.9346506000001682,
+    "parameter_device_counts": {
+      "cuda:0": 2849028,
+      "cuda:1": 2836484
+    },
+    "gradient_device_counts": {
+      "cuda:0": 2797826,
+      "cuda:1": 2785282
+    },
+    "cuda_memory": [
+      {
+        "logical_device": "cuda:0",
+        "allocated_bytes": 39535104,
+        "reserved_bytes": 50331648,
+        "max_allocated_bytes": 45131776
+      },
+      {
+        "logical_device": "cuda:1",
+        "allocated_bytes": 39431168,
+        "reserved_bytes": 50331648,
+        "max_allocated_bytes": 45001728
+      }
+    ]
+  }
+}

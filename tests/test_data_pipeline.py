@@ -14,7 +14,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from lpt_data import build_streaming_manifest_dataset, load_dataset_manifest, load_dataset_records
+from lpt_data import (
+    build_packed_training_batch,
+    build_streaming_manifest_dataset,
+    build_training_batch,
+    encode_training_sample,
+    load_dataset_manifest,
+    load_dataset_records,
+    prepare_tokenizer,
+)
 from lpt_config import GlobalConfig
 from lpt_protocol import (
     DS_BOS_TOKEN,
@@ -22,12 +30,6 @@ from lpt_protocol import (
     DS_PAD_TOKEN,
     render_prompt_from_messages,
     render_training_segments,
-)
-from lpt_training import (
-    build_packed_training_batch,
-    build_training_batch,
-    encode_training_sample,
-    prepare_tokenizer,
 )
 from tools.convert_instruction_chat_jsonl import convert_instruction_chat_jsonl
 from tools.convert_parquet_text_dataset import convert_parquet_text_dataset
@@ -332,7 +334,7 @@ class TestStructuredDataPipeline(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            manifest_path = manifest_dir / "text_pretrain.json"
+            manifest_path = manifest_dir / "text_manifest.json"
             manifest_path.write_text(
                 json.dumps(
                     {

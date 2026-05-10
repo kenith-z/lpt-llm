@@ -1,189 +1,184 @@
-"""推理与命令行对话模块"""
+"""LPT v2 chat 推理入口。"""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 
 import torch
 
-from lpt_config import GlobalConfig
+from lpt_config import GenerationConfig, GlobalConfig
 from lpt_protocol import render_prompt_from_messages
-from .visualization import render_token_position_table
+
+from .session import InferenceSession
 
 
 @dataclass(frozen=True)
 class GenerationResult:
-    """单条推理结果及其 token 统计。"""
+    """单条生成结果及 token 统计。"""
 
-    text: str
-    input_token_count: int
-    output_token_count: int
-
-
-def _normalize_conversations(conversations):
-    if not isinstance(conversations, list) or not conversations:
-        raise ValueError("conversations 必须是非空列表。")
-
-    first_item = conversations[0]
-    if isinstance(first_item, dict):
-        return [conversations]
-
-    if isinstance(first_item, list):
-        return conversations
-
-    raise TypeError("conversations 必须是消息列表，或消息列表组成的批次。")
+    prompt: str
+    response: str
+    prompt_token_count: int
+    generated_token_count: int
+    generated_token_ids: tuple[int, ...]
 
 
-def _encode_generation_inputs(tokenizer, conversations):
-    """把单条或多条结构化对话编码成推理输入。"""
-    normalized_conversations = _normalize_conversations(conversations)
-    prompts = [
-        render_prompt_from_messages(
+def build_default_generation_config(**overrides):
+    """构造默认生成配置。"""
+    payload = GenerationConfig().__dict__
+    payload.update(overrides)
+    return GenerationConfig(**payload)
+
+
+def _normalize_conversation(conversation):
+    if isinstance(conversation, str):
+        return [{"role": "user", "content": conversation}]
+    if isinstance(conversation, list):
+        return conversation
+    raise TypeError("conversation 必须是字符串或 messages 列表。")
+
+
+def _apply_repetition_penalty(logits, generated_ids, generation_config):
+    penalty = float(generation_config.repetition_penalty or 1.0)
+    window_size = generation_config.repetition_window_size
+    if penalty == 1.0 or not generated_ids:
+        return logits
+    recent_ids = generated_ids[-int(window_size):] if window_size else generated_ids
+    for token_id in set(recent_ids):
+        value = logits[token_id]
+        logits[token_id] = value / penalty if value > 0 else value * penalty
+    return logits
+
+
+def _filter_top_k_top_p(logits, generation_config):
+    filtered = logits
+    top_k = int(generation_config.top_k or 0)
+    if top_k > 0 and top_k < filtered.numel():
+        threshold = torch.topk(filtered, top_k).values[-1]
+        filtered = filtered.masked_fill(filtered < threshold, -float("inf"))
+    top_p = float(generation_config.top_p or 1.0)
+    if 0 < top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(filtered, descending=True)
+        probs = torch.softmax(sorted_logits, dim=-1)
+        cumulative = torch.cumsum(probs, dim=-1)
+        remove_mask = cumulative > top_p
+        remove_mask[1:] = remove_mask[:-1].clone()
+        remove_mask[0] = False
+        sorted_logits = sorted_logits.masked_fill(remove_mask, -float("inf"))
+        filtered = torch.full_like(filtered, -float("inf"))
+        filtered.scatter_(0, sorted_indices, sorted_logits)
+    return filtered
+
+
+def _select_next_token(logits, generated_ids, generation_config):
+    next_logits = logits[-1].float().clone()
+    next_logits = _apply_repetition_penalty(next_logits, generated_ids, generation_config)
+    if not generation_config.do_sample:
+        return int(torch.argmax(next_logits).item())
+    temperature = max(float(generation_config.temperature or 1.0), 1e-5)
+    next_logits = _filter_top_k_top_p(next_logits / temperature, generation_config)
+    probabilities = torch.softmax(next_logits, dim=-1)
+    if torch.isnan(probabilities).any() or float(probabilities.sum()) <= 0:
+        return int(torch.argmax(logits[-1].float()).item())
+    return int(torch.multinomial(probabilities, num_samples=1).item())
+
+
+def _autocast_enabled(device):
+    return device.type == "cuda" and GlobalConfig.autocast_dtype in {
+        torch.float16,
+        torch.bfloat16,
+    }
+
+
+@torch.no_grad()
+def generate_responses_with_token_counts(
+    model,
+    tokenizer,
+    conversations,
+    *,
+    generation_config=None,
+    request_id_prefix="chat",
+):
+    """对一组 conversation 生成回复并返回 token 统计。"""
+    resolved_generation_config = generation_config or build_default_generation_config()
+    was_training = model.training
+    model.eval()
+    results = []
+    if isinstance(conversations, (str, dict)):
+        conversation_list = [conversations]
+    else:
+        conversation_list = list(conversations)
+
+    eos_token_id = tokenizer.eos_token_id
+    pad_token_id = tokenizer.pad_token_id
+    for index, conversation in enumerate(conversation_list, start=1):
+        messages = _normalize_conversation(conversation)
+        prompt = render_prompt_from_messages(
             messages,
             template_version=GlobalConfig.chat_template_version,
             add_generation_prompt=True,
         )
-        for messages in normalized_conversations
-    ]
-    return tokenizer(
-        prompts,
-        padding=True,
-        padding_side="left",
-        return_tensors="pt",
-        return_attention_mask=True,
-    )
-
-
-def count_text_tokens(tokenizer, text):
-    """统计一段文本按当前 tokenizer 编码后的 token 数。"""
-    encoded = tokenizer(text, add_special_tokens=False)
-    return len(encoded["input_ids"])
-
-
-def _trim_generated_ids(sequence_ids, eos_token_id, pad_token_id=None):
-    trimmed_ids = list(sequence_ids)
-    if eos_token_id is not None and eos_token_id in trimmed_ids:
-        eos_index = trimmed_ids.index(eos_token_id)
-        trimmed_ids = trimmed_ids[:eos_index]
-
-    if pad_token_id is not None and pad_token_id != eos_token_id:
-        while trimmed_ids and trimmed_ids[-1] == pad_token_id:
-            trimmed_ids.pop()
-
-    return trimmed_ids
-
-
-def _build_generation_results(tokenizer, token_ids, prompt_width, input_token_counts):
-    results = []
-    for row in token_ids:
-        generated_ids = row[prompt_width:].tolist()
-        trimmed_ids = _trim_generated_ids(
-            generated_ids,
-            eos_token_id=tokenizer.eos_token_id,
-            pad_token_id=tokenizer.pad_token_id,
-        )
-        results.append(trimmed_ids)
-
-    return [
-        GenerationResult(
-            text=tokenizer.decode(output_ids, skip_special_tokens=False).strip(),
-            input_token_count=int(input_token_count),
-            output_token_count=len(output_ids),
-        )
-        for output_ids, input_token_count in zip(results, input_token_counts)
-    ]
-
-
-def _print_batch_outputs(results):
-    """按批次格式打印多条生成结果。"""
-    rendered_lines = []
-    for index, result in enumerate(results, start=1):
-        rendered_lines.append(
-            "\n".join(
-                [
-                    f"{GlobalConfig.model_abbr} #{index}:",
-                    f" {result.text}",
-                    f" 输入 token 数: {result.input_token_count}",
-                    f" 输出 token 数: {result.output_token_count}",
-                ]
+        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        if not prompt_ids:
+            raise ValueError("渲染后的 prompt 没有 token。")
+        session = InferenceSession(model, request_id=f"{request_id_prefix}-{index}")
+        with torch.autocast(
+            device_type=session.device.type,
+            dtype=GlobalConfig.autocast_dtype,
+            enabled=_autocast_enabled(session.device),
+        ):
+            logits = session.prefill(prompt_ids)
+        generated_ids = []
+        max_new_tokens = int(resolved_generation_config.max_length)
+        for _step in range(max_new_tokens):
+            next_id = _select_next_token(logits[0], generated_ids, resolved_generation_config)
+            if next_id == eos_token_id or next_id == pad_token_id:
+                break
+            generated_ids.append(next_id)
+            with torch.autocast(
+                device_type=session.device.type,
+                dtype=GlobalConfig.autocast_dtype,
+                enabled=_autocast_enabled(session.device),
+            ):
+                logits = session.append(next_id)
+        response = tokenizer.decode(generated_ids, skip_special_tokens=True)
+        results.append(
+            GenerationResult(
+                prompt=prompt,
+                response=response,
+                prompt_token_count=len(prompt_ids),
+                generated_token_count=len(generated_ids),
+                generated_token_ids=tuple(generated_ids),
             )
         )
-    print("\n".join(rendered_lines))
+    if was_training:
+        model.train()
+    return results
 
 
-def generate_responses_with_token_counts(model, tokenizer, conversations, config=None):
-    """基于结构化对话生成回复，并返回输入/输出 token 统计。"""
-    encoded_batch = _encode_generation_inputs(tokenizer, conversations)
-    input_token_counts = encoded_batch["attention_mask"].sum(dim=1).tolist()
-    input_ids = encoded_batch["input_ids"].to(GlobalConfig.device)
-    attention_mask = encoded_batch["attention_mask"].to(GlobalConfig.device)
-
-    with torch.no_grad():
-        with torch.autocast(device_type=GlobalConfig.device.type, dtype=GlobalConfig.autocast_dtype):
-            token_ids = model.generate(
-                prompt_tokens=input_ids,
-                config=config,
-                attention_mask=attention_mask,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
-
-    if getattr(GlobalConfig, "attention_plot_enabled", False):
-        render_token_position_table(tokenizer, token_ids[0])
-
-    return _build_generation_results(
-        tokenizer,
-        token_ids,
-        prompt_width=input_ids.size(1),
-        input_token_counts=input_token_counts,
-    )
-
-
-def generate_responses(model, tokenizer, conversations, config=None):
-    """基于结构化对话生成回复文本。"""
-    return [
-        result.text
-        for result in generate_responses_with_token_counts(
-            model,
-            tokenizer,
-            conversations=conversations,
-            config=config,
-        )
-    ]
-
-
-def run_chat_session(model, tokenizer, conversations=None, multi_turns=False, config=None):
-    """运行批量生成或命令行交互式聊天。"""
-    if conversations is not None:
-        results = generate_responses_with_token_counts(
-            model,
-            tokenizer,
-            conversations=conversations,
-            config=config,
-        )
-        _print_batch_outputs(results)
-        return [result.text for result in results]
-
-    conversation_state = []
+def run_chat_session(model, tokenizer, *, generation_config=None, multi_turn=True):
+    """运行交互式 chat 会话。"""
+    messages = []
+    print("进入 LPT v2 chat；输入 exit/quit 结束。")
     while True:
-        user_message = input("User: ").strip()
-        if user_message.lower() == "quit":
+        user_text = input("User> ").strip()
+        if user_text.lower() in {"exit", "quit"}:
             break
-        if not user_message:
+        if not user_text:
             continue
-
-        current_messages = [{"role": "user", "content": user_message}]
-        if multi_turns:
-            current_messages = conversation_state + current_messages
-
-        results = generate_responses_with_token_counts(
+        if not multi_turn:
+            messages = []
+        messages.append({"role": "user", "content": user_text})
+        result = generate_responses_with_token_counts(
             model,
             tokenizer,
-            conversations=current_messages,
-            config=config,
+            [messages],
+            generation_config=generation_config,
+        )[0]
+        print(f"Assistant> {result.response}")
+        print(
+            "tokens "
+            f"prompt={result.prompt_token_count} generated={result.generated_token_count}"
         )
-        result = results[0]
-        reply = result.text
-        print(f"{GlobalConfig.model_abbr}: {reply}")
-        print(f"输入 token 数: {result.input_token_count} | 输出 token 数: {result.output_token_count}")
-
-        if multi_turns:
-            conversation_state = current_messages + [{"role": "assistant", "content": reply}]
+        if result.response.strip():
+            messages.append({"role": "assistant", "content": result.response})

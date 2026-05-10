@@ -1,8 +1,7 @@
-"""基座模型文本预训练入口脚本。"""
+"""LPT v2 text pretrain 根入口。"""
 
 from lpt_workflows.text_pretrain import main
 
 
 if __name__ == "__main__":
-    main()
-
+    raise SystemExit(main())

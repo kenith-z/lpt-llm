@@ -1,6 +1,21 @@
-"""LPT 项目的 LoRA 微调子包。
+"""LPT v2 LoRA 适配器包。"""
 
-这个包主要负责两类工作：
-1. 给基础模型中的线性层挂载 LoRA 低秩适配器。
-2. 组织 LoRA 微调、加载权重、推理演示等工作流。
-"""
+from .adapter import (
+    LoRAConfig,
+    LowRankLinearAdapter,
+    attach_lora_adapters,
+    collect_lora_adapter_state,
+    load_lora_adapter_config,
+    load_lora_adapter_state,
+    save_lora_adapter_state,
+)
+
+__all__ = [
+    "LoRAConfig",
+    "LowRankLinearAdapter",
+    "attach_lora_adapters",
+    "collect_lora_adapter_state",
+    "load_lora_adapter_config",
+    "load_lora_adapter_state",
+    "save_lora_adapter_state",
+]
