@@ -133,6 +133,10 @@ class TestLPTV2Model(unittest.TestCase):
             model.layers[0].attention_mixer.retnet_assist,
             model.layers[1].attention_mixer.retnet_assist,
         )
+        self.assertIs(
+            model.layers[0].attention_mixer.q_adapter,
+            model.layers[1].attention_mixer.q_adapter,
+        )
         q_adapter = model.layers[0].attention_mixer.q_adapter
         self.assertEqual(q_adapter.alpha_q.dtype, torch.float32)
         self.assertFalse(model.config.retnet_k_adapter_enabled)
@@ -140,6 +144,103 @@ class TestLPTV2Model(unittest.TestCase):
 
         standalone_adapter = QOnlyRetNetAdapter(model.config).to(dtype=torch.float16)
         self.assertEqual(standalone_adapter.alpha_q.dtype, torch.float32)
+
+    def test_retnet_parameter_sharing_controls_module_identity(self):
+        group_config = build_tiny_v2_config(
+            num_layers=4,
+            layer_block_types=("attention", "attention", "attention", "attention"),
+            retnet_parameter_sharing="group",
+            retnet_sharing_group_size=2,
+        )
+        group_model = LPTV2(32, group_config)
+
+        self.assertIs(
+            group_model.layers[0].attention_mixer.retnet_assist,
+            group_model.layers[1].attention_mixer.retnet_assist,
+        )
+        self.assertIsNot(
+            group_model.layers[0].attention_mixer.retnet_assist,
+            group_model.layers[2].attention_mixer.retnet_assist,
+        )
+        self.assertIs(
+            group_model.layers[0].attention_mixer.q_adapter,
+            group_model.layers[1].attention_mixer.q_adapter,
+        )
+        self.assertIsNot(
+            group_model.layers[0].attention_mixer.q_adapter,
+            group_model.layers[2].attention_mixer.q_adapter,
+        )
+
+        per_layer_model = LPTV2(
+            32,
+            group_config.with_overrides(retnet_parameter_sharing="per_layer"),
+        )
+        self.assertIsNot(
+            per_layer_model.layers[0].attention_mixer.retnet_assist,
+            per_layer_model.layers[1].attention_mixer.retnet_assist,
+        )
+        self.assertIsNot(
+            per_layer_model.layers[0].attention_mixer.q_adapter,
+            per_layer_model.layers[1].attention_mixer.q_adapter,
+        )
+
+    def test_retnet_state_sharing_uses_group_slots(self):
+        config = build_tiny_v2_config(
+            num_layers=4,
+            layer_block_types=("attention", "attention", "attention", "attention"),
+            retnet_state_sharing="group",
+            retnet_sharing_group_size=2,
+        )
+        model = LPTV2(32, config)
+
+        _, states = model.prefill(torch.tensor([[1, 2, 3, 4]], dtype=torch.long), request_id="group-state")
+
+        self.assertEqual([state.retnet_assist.state_slot for state in states], [0, 0, 1, 1])
+        self.assertEqual([state.retnet_assist.token_count for state in states], [4, 4, 4, 4])
+        metadata = model.retnet_state_pool.to_runtime_metadata()
+        self.assertEqual(metadata["state_slot_count"], 2)
+        self.assertEqual(metadata["requests"]["group-state"]["state_count"], 2)
+
+    def test_retnet_sparse_layers_do_not_keep_unused_adapter_state(self):
+        config = build_tiny_v2_config(
+            num_layers=4,
+            layer_block_types=("attention", "attention", "attention", "attention"),
+            retnet_assist_layers="every_2_layers",
+            retnet_state_sharing="per_layer",
+        )
+        model = LPTV2(32, config)
+
+        self.assertIsNone(model.layers[1].attention_mixer.retnet_assist)
+        self.assertIsNone(model.layers[1].attention_mixer.q_adapter)
+
+        _, states = model.prefill(torch.tensor([[1, 2, 3, 4]], dtype=torch.long), request_id="sparse-retnet")
+
+        self.assertEqual(
+            [state.retnet_assist is not None for state in states],
+            [True, False, True, False],
+        )
+        metadata = model.retnet_state_pool.to_runtime_metadata()
+        self.assertEqual(metadata["requests"]["sparse-retnet"]["state_count"], 2)
+
+    def test_retnet_selected_layers_only_update_selected_state(self):
+        config = build_tiny_v2_config(
+            num_layers=4,
+            layer_block_types=("attention", "attention", "attention", "attention"),
+            retnet_assist_layers="selected_layers",
+            retnet_assist_selected_layers=(1, 3),
+        )
+        model = LPTV2(32, config)
+
+        _, states = model.prefill(torch.tensor([[1, 2, 3, 4]], dtype=torch.long), request_id="selected-retnet")
+
+        self.assertEqual(
+            [state.retnet_assist is not None for state in states],
+            [False, True, False, True],
+        )
+        self.assertEqual(
+            [None if state.retnet_assist is None else state.retnet_assist.state_slot for state in states],
+            [None, 0, None, 0],
+        )
 
     def test_retnet_qk_adapter_updates_key_without_touching_value(self):
         config = build_tiny_v2_config(

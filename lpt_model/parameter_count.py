@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from lpt_config import (
     ModelConfig,
     PARAMETER_COUNT_POLICY_MOE_AWARE,
+    is_retnet_assist_enabled_for_layer,
     count_xlstm_memory_enabled_layers,
 )
 
@@ -76,18 +77,36 @@ def _count_enabled_layers(num_layers, layer_policy, *, default_interval=None):
     return (int(num_layers) + interval - 1) // interval
 
 
+def _enabled_retnet_layer_indices(config):
+    return tuple(
+        layer_index
+        for layer_index in range(int(config.num_layers))
+        if is_retnet_assist_enabled_for_layer(config, layer_index)
+    )
+
+
+def _retnet_group_ids(config, layer_indices):
+    group_size = int(config.retnet_sharing_group_size)
+    if group_size <= 0:
+        raise ValueError("retnet_sharing_group_size 必须为正整数。")
+    return tuple(sorted({int(layer_index) // group_size for layer_index in layer_indices}))
+
+
 def _count_retnet_parameter_groups(config):
-    enabled_layers = _count_enabled_layers(config.num_layers, config.retnet_assist_layers)
-    if not config.retnet_assist_enabled or enabled_layers == 0:
+    enabled_layers = _enabled_retnet_layer_indices(config)
+    enabled_layer_count = len(enabled_layers)
+    if enabled_layer_count == 0:
         return 0, 0
     if config.retnet_parameter_sharing == "global":
         parameter_groups = 1
+    elif config.retnet_parameter_sharing == "group":
+        parameter_groups = len(_retnet_group_ids(config, enabled_layers))
     else:
-        parameter_groups = enabled_layers
+        parameter_groups = enabled_layer_count
     if config.retnet_state_sharing == "group":
-        state_slots = parameter_groups
+        state_slots = len(_retnet_group_ids(config, enabled_layers))
     else:
-        state_slots = enabled_layers
+        state_slots = enabled_layer_count
     return parameter_groups, state_slots
 
 

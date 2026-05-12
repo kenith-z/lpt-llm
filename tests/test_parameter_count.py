@@ -105,6 +105,64 @@ class TestMoEAwareParameterCount(unittest.TestCase):
         self.assertGreater(qk_report.module_breakdown["retnet_k_adapter"], 0)
         self.assertGreater(qk_report.adapter_params, q_report.adapter_params)
 
+    def test_retnet_sharing_strategy_changes_parameter_and_state_counts(self):
+        base_config = ModelConfig.from_preset(
+            LPT_V2_DEV_TINY_PRESET,
+            retnet_assist_layers="all_layers",
+            retnet_sharing_group_size=2,
+        )
+        global_group = base_config.with_overrides(
+            retnet_parameter_sharing="global",
+            retnet_state_sharing="group",
+        )
+        group_group = base_config.with_overrides(
+            retnet_parameter_sharing="group",
+            retnet_state_sharing="group",
+        )
+        per_layer = base_config.with_overrides(
+            retnet_parameter_sharing="per_layer",
+            retnet_state_sharing="per_layer",
+        )
+
+        global_report = estimate_moe_aware_parameter_counts(global_group)
+        group_report = estimate_moe_aware_parameter_counts(group_group)
+        per_layer_report = estimate_moe_aware_parameter_counts(per_layer)
+
+        self.assertLess(
+            global_report.module_breakdown["retnet_q_adapter"],
+            group_report.module_breakdown["retnet_q_adapter"],
+        )
+        self.assertLess(
+            group_report.module_breakdown["retnet_q_adapter"],
+            per_layer_report.module_breakdown["retnet_q_adapter"],
+        )
+        self.assertLess(group_report.state_runtime_bytes, per_layer_report.state_runtime_bytes)
+
+    def test_retnet_enabled_layer_policy_changes_parameter_count(self):
+        all_layers_config = ModelConfig.from_preset(
+            LPT_V2_DEV_TINY_PRESET,
+            retnet_assist_layers="all_layers",
+            retnet_parameter_sharing="per_layer",
+            retnet_state_sharing="per_layer",
+        )
+        selected_layers_config = all_layers_config.with_overrides(
+            retnet_assist_layers="selected_layers",
+            retnet_assist_selected_layers=(0, 2),
+        )
+
+        all_layers_report = estimate_moe_aware_parameter_counts(all_layers_config)
+        selected_layers_report = estimate_moe_aware_parameter_counts(selected_layers_config)
+
+        self.assertEqual(
+            selected_layers_report.module_breakdown["retnet_assist_core"],
+            all_layers_report.module_breakdown["retnet_assist_core"] // 2,
+        )
+        self.assertEqual(
+            selected_layers_report.module_breakdown["retnet_q_adapter"],
+            all_layers_report.module_breakdown["retnet_q_adapter"] // 2,
+        )
+        self.assertLess(selected_layers_report.state_runtime_bytes, all_layers_report.state_runtime_bytes)
+
 
 if __name__ == "__main__":
     unittest.main()

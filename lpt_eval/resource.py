@@ -9,6 +9,7 @@ from time import perf_counter
 
 import torch
 
+from lpt_config import count_retnet_assist_enabled_layers
 from lpt_config import ResourceEvalConfig
 from lpt_config.profiles import build_lpt_v2_profile_config
 from lpt_model import LPTV2, load_lpt_v2_checkpoint
@@ -69,6 +70,15 @@ class ResourceReport:
             f"| peak_memory_bytes | {metrics['peak_memory_bytes']} |",
             f"| paged_kv_page_bytes | {metrics['paged_kv_page_bytes']} |",
             f"| retnet_state_bytes | {metrics['retnet_state_bytes']} |",
+            f"| retnet_state_slot_count | {metrics['retnet_state_slot_count']} |",
+            f"| retnet_layer_state_count | {metrics['retnet_layer_state_count']} |",
+            f"| expected_retnet_layer_state_count | {metrics['expected_retnet_layer_state_count']} |",
+            f"| retnet_enabled_layer_count | {metrics['retnet_enabled_layer_count']} |",
+            f"| retnet_assist_layers | `{metrics['retnet_assist_layers']}` |",
+            f"| retnet_assist_selected_layers | `{metrics['retnet_assist_selected_layers']}` |",
+            f"| retnet_adapter_rank | {metrics['retnet_adapter_rank']} |",
+            f"| retnet_parameter_sharing | `{metrics['retnet_parameter_sharing']}` |",
+            f"| retnet_state_sharing | `{metrics['retnet_state_sharing']}` |",
             f"| retnet_summary_norm_mean | {metrics['retnet_summary_norm_mean']:.6f} |",
             f"| retnet_q_adapter_delta_norm_mean | {metrics['retnet_q_adapter_delta_norm_mean']:.6f} |",
             f"| retnet_k_adapter_delta_norm_mean | {metrics['retnet_k_adapter_delta_norm_mean']:.6f} |",
@@ -98,14 +108,18 @@ def _synchronize_if_needed(device):
 def _state_bytes(states):
     retnet_bytes = 0
     xlstm_bytes = 0
+    seen_retnet_slots = set()
     for state in states:
         if state.retnet_assist is not None and state.retnet_assist.summary is not None:
-            summary = state.retnet_assist.summary
-            retnet_bytes += int(summary.numel() * summary.element_size())
+            state_slot = int(state.retnet_assist.state_slot)
+            if state_slot not in seen_retnet_slots:
+                summary = state.retnet_assist.summary
+                retnet_bytes += int(summary.numel() * summary.element_size())
+                seen_retnet_slots.add(state_slot)
         if state.xlstm_memory is not None and state.xlstm_memory.memory is not None:
             memory = state.xlstm_memory.memory
             xlstm_bytes += int(memory.numel() * memory.element_size())
-    return retnet_bytes, xlstm_bytes
+    return retnet_bytes, len(seen_retnet_slots), xlstm_bytes
 
 
 def _router_metrics(states):
@@ -267,7 +281,9 @@ def run_lpt_v2_resource_report(
     for handle in handles:
         handle.remove()
 
-    retnet_bytes, xlstm_bytes = _state_bytes(decode_states)
+    retnet_bytes, retnet_state_slot_count, xlstm_bytes = _state_bytes(decode_states)
+    retnet_layer_state_count = sum(1 for state in decode_states if state.retnet_assist is not None)
+    expected_retnet_layer_state_count = count_retnet_assist_enabled_layers(config)
     (
         retnet_summary_norm,
         retnet_q_adapter_delta_norm,
@@ -301,6 +317,17 @@ def run_lpt_v2_resource_report(
         "paged_kv_page_bytes": model.paged_kv_cache.allocated_bytes,
         "paged_kv_runtime_metadata": model.paged_kv_cache.runtime_metadata(),
         "retnet_state_bytes": retnet_bytes,
+        "retnet_state_slot_count": int(retnet_state_slot_count),
+        "retnet_layer_state_count": int(retnet_layer_state_count),
+        "expected_retnet_layer_state_count": int(expected_retnet_layer_state_count),
+        "retnet_enabled_layer_count": int(count_retnet_assist_enabled_layers(config)),
+        "retnet_assist_layers": config.retnet_assist_layers,
+        "retnet_assist_selected_layers": list(config.retnet_assist_selected_layers),
+        "retnet_adapter_rank": int(config.retnet_adapter_rank),
+        "retnet_parameter_sharing": config.retnet_parameter_sharing,
+        "retnet_state_sharing": config.retnet_state_sharing,
+        "retnet_sharing_group_size": int(config.retnet_sharing_group_size),
+        "retnet_state_pool_metadata": model.retnet_state_pool.to_runtime_metadata(),
         "retnet_summary_norm_mean": float(retnet_summary_norm),
         "retnet_q_adapter_delta_norm_mean": float(retnet_q_adapter_delta_norm),
         "retnet_k_adapter_delta_norm_mean": float(retnet_k_adapter_delta_norm),

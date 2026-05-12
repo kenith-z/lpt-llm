@@ -19,6 +19,8 @@ from lpt_config import (
     GlobalConfig,
     LPT_V2_ARCHITECTURE_VERSION,
     PAGED_KV_CACHE_BACKEND,
+    count_retnet_assist_enabled_layers,
+    is_retnet_assist_enabled_for_layer,
     is_xlstm_memory_enabled_for_layer,
     normalize_model_config,
 )
@@ -62,6 +64,56 @@ def _move_optional_tensor(tensor, device, *, dtype=None):
     if dtype is None:
         return tensor.to(device=device)
     return tensor.to(device=device, dtype=dtype)
+
+
+def _retnet_enabled_for_layer(config, layer_index):
+    return is_retnet_assist_enabled_for_layer(config, layer_index)
+
+
+def _retnet_group_id(config, layer_index):
+    group_size = int(config.retnet_sharing_group_size)
+    if group_size <= 0:
+        raise ValueError("retnet_sharing_group_size 必须为正整数。")
+    return int(layer_index) // group_size
+
+
+def _retnet_parameter_slot_for_layer(config, layer_index):
+    if not _retnet_enabled_for_layer(config, layer_index):
+        return None
+    sharing = str(config.retnet_parameter_sharing)
+    if sharing == "global":
+        return 0
+    if sharing == "group":
+        return _retnet_group_id(config, layer_index)
+    if sharing == "per_layer":
+        return int(layer_index)
+    raise ValueError(f"未知 retnet_parameter_sharing: {sharing}")
+
+
+def _retnet_state_slot_for_layer(config, layer_index):
+    if not _retnet_enabled_for_layer(config, layer_index):
+        return int(layer_index)
+    sharing = str(config.retnet_state_sharing)
+    if sharing == "group":
+        return _retnet_group_id(config, layer_index)
+    if sharing == "per_layer":
+        return int(layer_index)
+    raise ValueError(f"未知 retnet_state_sharing: {sharing}")
+
+
+def _retnet_layer_to_state_slots(config):
+    return tuple(_retnet_state_slot_for_layer(config, layer_index) for layer_index in range(int(config.num_layers)))
+
+
+def _retnet_state_slot_count(config):
+    slots = {
+        _retnet_state_slot_for_layer(config, layer_index)
+        for layer_index in range(int(config.num_layers))
+        if _retnet_enabled_for_layer(config, layer_index)
+    }
+    if not slots:
+        return int(config.num_layers)
+    return max(slots) + 1
 
 
 def _build_local_attention_mask(
@@ -255,7 +307,15 @@ class SharedRetNetAssist(nn.Module):
             dtype=x.dtype,
         )
 
-    def forward(self, x_norm, attention_mask=None, previous_state=None, request_id=DEFAULT_REQUEST_ID, layer_index=0):
+    def forward(
+        self,
+        x_norm,
+        attention_mask=None,
+        previous_state=None,
+        request_id=DEFAULT_REQUEST_ID,
+        layer_index=0,
+        state_slot=None,
+    ):
         """返回每个 token 的摘要序列和更新后的 request-bound 状态。"""
         projected = self.activation(self.input_proj(x_norm))
         if attention_mask is None:
@@ -298,6 +358,7 @@ class SharedRetNetAssist(nn.Module):
         new_state = RetNetAssistState(
             request_id=request_id,
             layer_index=layer_index,
+            state_slot=layer_index if state_slot is None else state_slot,
             summary=final_summary.detach(),
             token_count=final_count,
             summary_norm=summary_norm,
@@ -397,10 +458,11 @@ class QOnlyRetNetAdapter(nn.Module):
 class LocalAttentionMixerV2(nn.Module):
     """Local Attention + RetNetAssist Q/QK adapter。"""
 
-    def __init__(self, config, layer_index, retnet_assist, paged_kv_cache):
+    def __init__(self, config, layer_index, retnet_assist, q_adapter, paged_kv_cache, *, retnet_state_slot=None):
         super().__init__()
         self.config = config
         self.layer_index = int(layer_index)
+        self.retnet_state_slot = self.layer_index if retnet_state_slot is None else int(retnet_state_slot)
         self.hidden_size = int(config.hidden_size)
         self.num_heads = int(config.num_heads)
         self.num_kv_heads = int(config.num_kv_heads)
@@ -408,7 +470,7 @@ class LocalAttentionMixerV2(nn.Module):
         self.dropout_rate = float(config.dropout_rate)
         self.retnet_assist = retnet_assist
         self.paged_kv_cache = paged_kv_cache
-        self.q_adapter = QOnlyRetNetAdapter(config)
+        self.q_adapter = q_adapter
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
@@ -421,17 +483,7 @@ class LocalAttentionMixerV2(nn.Module):
         )
 
     def _retnet_enabled_for_layer(self):
-        if not self.config.retnet_assist_enabled:
-            return False
-        policy = str(self.config.retnet_assist_layers)
-        if policy == "all_layers":
-            return True
-        if policy == "selected_layers":
-            return False
-        if policy.startswith("every_") and policy.endswith("_layers"):
-            interval = int(policy.removeprefix("every_").removesuffix("_layers"))
-            return self.layer_index % interval == 0
-        return False
+        return _retnet_enabled_for_layer(self.config, self.layer_index)
 
     def _read_past_kv(self, attention_state):
         if attention_state is None:
@@ -460,17 +512,22 @@ class LocalAttentionMixerV2(nn.Module):
         k = self.k_proj(x_norm).view(batch_size, query_length, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x_norm).view(batch_size, query_length, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
-        retnet_state = layer_state.retnet_assist
         if self._retnet_enabled_for_layer():
+            if self.retnet_assist is None or self.q_adapter is None:
+                raise RuntimeError("启用 RetNetAssist 的层缺少 retnet_assist 或 q_adapter 模块。")
             summary_sequence, retnet_state = self.retnet_assist(
                 x_norm,
                 attention_mask=attention_mask,
                 previous_state=layer_state.retnet_assist,
                 request_id=request_id,
                 layer_index=self.layer_index,
+                state_slot=self.retnet_state_slot,
             )
             q, k, adapter_metrics = self.q_adapter.apply_to_qk(summary_sequence, q, k)
             retnet_state = replace(retnet_state, **adapter_metrics)
+        else:
+            # 禁用 RetNetAssist 的层必须清空传入状态，避免 state pool 绑定时把共享 slot 的状态串到未启用层。
+            retnet_state = None
 
         q, k = rope_cache(q, k, position_ids)
         use_kv_cache = bool(use_kv_cache)
@@ -792,12 +849,19 @@ class xLSTMMemoryAssist(nn.Module):
 class LPTBlockV2(nn.Module):
     """LPT v2 Decoder block。"""
 
-    def __init__(self, config, layer_index, retnet_assist, paged_kv_cache):
+    def __init__(self, config, layer_index, retnet_assist, q_adapter, paged_kv_cache, *, retnet_state_slot=None):
         super().__init__()
         self.layer_index = int(layer_index)
         self.sequence_norm = RMSNorm(config.hidden_size)
         self.ffn_norm = RMSNorm(config.hidden_size)
-        self.attention_mixer = LocalAttentionMixerV2(config, layer_index, retnet_assist, paged_kv_cache)
+        self.attention_mixer = LocalAttentionMixerV2(
+            config,
+            layer_index,
+            retnet_assist,
+            q_adapter,
+            paged_kv_cache,
+            retnet_state_slot=retnet_state_slot,
+        )
         self.xlstm_memory = xLSTMMemoryAssist(config, layer_index)
         self.feed_forward = SwiGLUMoE(config, layer_index)
 
@@ -857,11 +921,55 @@ class LPTV2(nn.Module):
             page_block_size=self.config.page_block_size,
             attention_window_size=self.config.attention_window_size,
         )
-        self.retnet_state_pool = RetNetAssistStatePool(self.config.num_layers)
+        self.retnet_layer_to_state_slot = _retnet_layer_to_state_slots(self.config)
+        self.retnet_state_pool = RetNetAssistStatePool(
+            self.config.num_layers,
+            layer_to_state_slot=self.retnet_layer_to_state_slot,
+            state_slot_count=_retnet_state_slot_count(self.config),
+        )
         self.xlstm_memory_state_pool = xLSTMMemoryStatePool(self.config.num_layers)
-        self.shared_retnet_assist = SharedRetNetAssist(self.config)
+        enabled_parameter_slots = {
+            int(slot)
+            for layer_index in range(int(self.config.num_layers))
+            for slot in (_retnet_parameter_slot_for_layer(self.config, layer_index),)
+            if slot is not None
+        }
+        self.shared_retnet_assist = (
+            SharedRetNetAssist(self.config)
+            if 0 in enabled_parameter_slots
+            else None
+        )
+        retnet_assist_by_slot = (
+            {0: self.shared_retnet_assist}
+            if self.shared_retnet_assist is not None
+            else {}
+        )
+        q_adapter_by_slot = {}
+
+        def retnet_assist_for(parameter_slot):
+            if parameter_slot not in retnet_assist_by_slot:
+                retnet_assist_by_slot[parameter_slot] = SharedRetNetAssist(self.config)
+            return retnet_assist_by_slot[parameter_slot]
+
+        def q_adapter_for(parameter_slot):
+            if parameter_slot not in q_adapter_by_slot:
+                q_adapter_by_slot[parameter_slot] = QOnlyRetNetAdapter(self.config)
+            return q_adapter_by_slot[parameter_slot]
+
+        def retnet_modules_for(layer_index):
+            slot = _retnet_parameter_slot_for_layer(self.config, layer_index)
+            if slot is None:
+                return None, None
+            return retnet_assist_for(int(slot)), q_adapter_for(int(slot))
+
         self.layers = nn.ModuleList([
-            LPTBlockV2(self.config, layer_index, self.shared_retnet_assist, self.paged_kv_cache)
+            LPTBlockV2(
+                self.config,
+                layer_index,
+                *retnet_modules_for(layer_index),
+                self.paged_kv_cache,
+                retnet_state_slot=self.retnet_layer_to_state_slot[layer_index],
+            )
             for layer_index in range(self.config.num_layers)
         ])
         self.final_norm = RMSNorm(self.config.hidden_size)
@@ -873,6 +981,10 @@ class LPTV2(nn.Module):
     @property
     def num_state_slots(self):
         return self.config.num_layers
+
+    @property
+    def retnet_enabled_layer_count(self):
+        return count_retnet_assist_enabled_layers(self.config)
 
     def _build_rope_cache(self, max_seq_len, embedding_mode):
         return build_rotary_position_encoding(
@@ -915,6 +1027,17 @@ class LPTV2(nn.Module):
             raise ValueError("LPTV2 layer_states 数量必须等于 num_layers。")
         return list(layer_states)
 
+    def _collect_retnet_previous_states(self, layer_states):
+        states_by_slot = {}
+        for layer_index, layer_state in enumerate(layer_states):
+            if not _retnet_enabled_for_layer(self.config, layer_index):
+                continue
+            if layer_state is None or layer_state.retnet_assist is None:
+                continue
+            state_slot = self.retnet_layer_to_state_slot[layer_index]
+            states_by_slot[state_slot] = layer_state.retnet_assist
+        return states_by_slot
+
     def forward(
         self,
         input_ids,
@@ -944,8 +1067,17 @@ class LPTV2(nn.Module):
         rope_cache = self.get_rope_cache(rope_cache_scope)
         hidden_states = self.token_embedding(input_ids)
         previous_states = self._normalize_incoming_layer_states(layer_states)
+        previous_retnet_states = self._collect_retnet_previous_states(previous_states)
         new_states = []
-        for layer, layer_state in zip(self.layers, previous_states):
+        for layer_index, (layer, layer_state) in enumerate(zip(self.layers, previous_states)):
+            layer_state = _as_layer_state_v2(layer_state)
+            if _retnet_enabled_for_layer(self.config, layer_index):
+                state_slot = self.retnet_layer_to_state_slot[layer_index]
+                if state_slot in previous_retnet_states:
+                    layer_state = replace(
+                        layer_state,
+                        retnet_assist=replace(previous_retnet_states[state_slot], layer_index=layer_index),
+                    )
             layer_device = next(layer.parameters()).device
             if hidden_states.device != layer_device:
                 hidden_states = hidden_states.to(device=layer_device)

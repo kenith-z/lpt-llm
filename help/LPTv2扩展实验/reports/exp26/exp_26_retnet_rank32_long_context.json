@@ -1,0 +1,89 @@
+{
+  "report_type": "lpt_v2_long_context_admission",
+  "preset": "lpt_v2_small_base",
+  "device": "cuda:0",
+  "dtype": "bfloat16",
+  "vocabulary_size": 129280,
+  "sequence_length": 4100,
+  "attention_window_size": 2048,
+  "needle_depth": 0.0,
+  "metrics": {
+    "needle": {
+      "target_token_id": 129277,
+      "needle_index": 1,
+      "needle_depth": 0.0,
+      "assist_rank": 25257,
+      "no_assist_rank": null,
+      "rank_delta": null,
+      "assist_logprob": -24.411352157592773,
+      "no_assist_logprob": null,
+      "logprob_delta": null
+    },
+    "long_text_ppl": {
+      "assist_loss": 50.267555236816406,
+      "no_assist_loss": null,
+      "assist_ppl": 485165195.4097903,
+      "no_assist_ppl": null,
+      "relative_delta": null
+    },
+    "qa_retrieval": {
+      "proxy": "needle_rank",
+      "assist_reciprocal_rank": 3.9592984123213365e-05,
+      "no_assist_reciprocal_rank": null
+    },
+    "code_math": {
+      "proxy": "deterministic_pattern_next_token_loss",
+      "assist_loss": 46.74554443359375,
+      "no_assist_loss": null
+    },
+    "format_following": {
+      "proxy": "structured_pattern_next_token_loss",
+      "assist_loss": 46.96389389038086,
+      "no_assist_loss": null
+    },
+    "mechanism": {
+      "assist_retnet_token_count": 4096,
+      "paged_kv_window_token_count": 2048,
+      "q_adapter_delta_norm": 1.206580126658082,
+      "k_adapter_delta_norm": 0.0,
+      "mechanism_ready": true,
+      "retnet_assist_layers": "all_layers",
+      "retnet_assist_selected_layers": [],
+      "retnet_enabled_layer_count": 24,
+      "retnet_first_enabled_layer": 0,
+      "retnet_assist_mode": "q_adapter",
+      "retnet_adapter_rank": 32,
+      "retnet_parameter_sharing": "global",
+      "retnet_state_sharing": "group",
+      "retnet_sharing_group_size": 4,
+      "retnet_adapter_target": [
+        "q"
+      ],
+      "retnet_k_adapter_enabled": false
+    },
+    "quality_decision": {
+      "status": "admit_checkpoint_path",
+      "reason": "已加载真实 v2 checkpoint 完成长上下文前向、PPL 与状态池准入；质量结论需结合独立验证集。"
+    }
+  },
+  "checkpoint_path": "artifacts\\lpt_v2\\experiments_exp26\\exp_26_retnet_rank32\\checkpoints\\latest\\model.pt",
+  "checkpoint_metadata": {
+    "checkpoint_format": "lpt_v2_checkpoint",
+    "checkpoint_schema_version": 2,
+    "architecture_version": "lpt_v2",
+    "model_config_schema_version": 2,
+    "training_stage": "exp_26_retnet_rank32",
+    "run_id": "exp26_retnet_rank32",
+    "global_step": 1164,
+    "optimizer_step": 1164,
+    "tokens_seen": 435335,
+    "source_manifest": "data\\manifests\\chat_sft.json",
+    "eval_manifest": "data\\manifests\\chat_sft_eval_exp26.json",
+    "tokenizer_metadata": {
+      "tokenizer_path": "F:\\yuan\\pyPro\\moe_llm\\lpt_model\\ds_tokenizer",
+      "tokenizer_config_sha256": "e4e7a46cd993c8e7f2422f868c87b41ad16c4ef270ec1417199d4414aff0549b",
+      "vocab_size": 129280,
+      "chat_template_version": "lpt-ds-v1"
+    }
+  }
+}

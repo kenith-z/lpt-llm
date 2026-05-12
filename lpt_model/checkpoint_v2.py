@@ -12,6 +12,7 @@ from lpt_config import (
     LPT_V2_ARCHITECTURE_VERSION,
     MODEL_CONFIG_SCHEMA_VERSION,
     build_model_config_from_checkpoint,
+    count_retnet_assist_enabled_layers,
     count_xlstm_memory_enabled_layers,
 )
 from lpt_runtime.files import atomic_torch_save
@@ -54,9 +55,15 @@ def _state_schema_metadata(config):
         "retnet_assist_state": {
             "state_type": "retnet_assist_state",
             "state_dim": config.retnet_state_dim,
+            "enabled_layer_count": count_retnet_assist_enabled_layers(config),
+            "layers": config.retnet_assist_layers,
+            "selected_layers": list(config.retnet_assist_selected_layers),
+            "parameter_sharing": config.retnet_parameter_sharing,
             "state_sharing": config.retnet_state_sharing,
+            "sharing_group_size": int(config.retnet_sharing_group_size),
             "lifecycle": config.retnet_state_lifecycle,
             "assist_mode": config.retnet_assist_mode,
+            "adapter_rank": int(config.retnet_adapter_rank),
             "adapter_target": list(config.retnet_adapter_target),
             "k_adapter_enabled": bool(config.retnet_k_adapter_enabled),
         },

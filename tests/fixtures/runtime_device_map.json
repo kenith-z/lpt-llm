@@ -1,0 +1,7 @@
+{
+  "layers": [
+    "cuda:0",
+    "cuda:1",
+    "cuda:1"
+  ]
+}

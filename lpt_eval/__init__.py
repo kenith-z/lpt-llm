@@ -2,7 +2,18 @@
 
 from .baseline import BaselineProfileResult, BaselineReport, run_lpt_v2_baselines
 from .forward_smoke import ForwardSmokeReport, run_lpt_v2_forward_smoke_report
-from .long_context import LongContextAdmissionReport, run_lpt_v2_long_context_admission
+from .long_context import (
+    LongContextAdmissionReport,
+    run_lpt_v2_long_context_admission,
+    run_lpt_v2_long_context_admission_for_model,
+)
+from .long_context_suite import LongContextSuiteReport, run_lpt_v2_long_context_suite
+from .longrope2_factor_sweep import (
+    LongRoPE2FactorCandidate,
+    LongRoPE2FactorSweepReport,
+    build_longrope2_factor_candidates,
+    run_lpt_v2_longrope2_factor_sweep,
+)
 from .memory import MemoryAssistReport, run_lpt_v2_memory_assist_report
 from lpt_config.profiles import (
     LPT_V2_ASSIST_PROFILE,

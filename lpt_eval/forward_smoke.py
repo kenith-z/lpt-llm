@@ -7,7 +7,7 @@ from pathlib import Path
 
 import torch
 
-from lpt_config import GlobalConfig, count_xlstm_memory_enabled_layers
+from lpt_config import GlobalConfig, count_retnet_assist_enabled_layers, count_xlstm_memory_enabled_layers
 from lpt_model import load_lpt_v2_checkpoint
 
 from .utils import (
@@ -68,6 +68,14 @@ class ForwardSmokeReport:
             f"| state_count | {metrics['state_count']} |",
             f"| attention_state_count | {metrics['attention_state_count']} |",
             f"| retnet_state_count | {metrics['retnet_state_count']} |",
+            f"| retnet_layer_state_count | {metrics['retnet_layer_state_count']} |",
+            f"| expected_retnet_layer_state_count | {metrics['expected_retnet_layer_state_count']} |",
+            f"| retnet_assist_layers | `{metrics['retnet_assist_layers']}` |",
+            f"| retnet_assist_selected_layers | `{metrics['retnet_assist_selected_layers']}` |",
+            f"| retnet_adapter_rank | {metrics['retnet_adapter_rank']} |",
+            f"| retnet_parameter_sharing | `{metrics['retnet_parameter_sharing']}` |",
+            f"| retnet_state_sharing | `{metrics['retnet_state_sharing']}` |",
+            f"| retnet_sharing_group_size | {metrics['retnet_sharing_group_size']} |",
             f"| retnet_assist_mode | `{metrics['retnet_assist_mode']}` |",
             f"| retnet_adapter_target | `{metrics['retnet_adapter_target']}` |",
             f"| retnet_k_adapter_enabled | {metrics['retnet_k_adapter_enabled']} |",
@@ -82,16 +90,18 @@ class ForwardSmokeReport:
 
 def _count_layer_states(layer_states):
     attention_state_count = 0
-    retnet_state_count = 0
+    retnet_state_slots = set()
+    retnet_layer_state_count = 0
     xlstm_state_count = 0
     for layer_state in layer_states:
         if layer_state.attention is not None:
             attention_state_count += 1
         if layer_state.retnet_assist is not None:
-            retnet_state_count += 1
+            retnet_layer_state_count += 1
+            retnet_state_slots.add(int(layer_state.retnet_assist.state_slot))
         if layer_state.xlstm_memory is not None:
             xlstm_state_count += 1
-    return attention_state_count, retnet_state_count, xlstm_state_count
+    return attention_state_count, len(retnet_state_slots), retnet_layer_state_count, xlstm_state_count
 
 
 def _mean_optional(values):
@@ -160,10 +170,11 @@ def run_lpt_v2_forward_smoke_report(
         )
         loss, ppl = next_token_loss(logits, input_ids)
 
-    attention_count, retnet_count, xlstm_count = _count_layer_states(layer_states)
+    attention_count, retnet_count, retnet_layer_count, xlstm_count = _count_layer_states(layer_states)
     expected_shape = [int(batch_size), int(sequence_length), vocabulary_size]
     logits_shape = list(logits.shape)
     logits_finite = bool(torch.isfinite(logits).all().detach().cpu())
+    expected_retnet_count = count_retnet_assist_enabled_layers(model.config)
     expected_xlstm_count = count_xlstm_memory_enabled_layers(model.config)
     paged_kv_metadata = model.paged_kv_cache.runtime_metadata()
     retnet_metrics = _retnet_observability(layer_states)
@@ -172,6 +183,7 @@ def run_lpt_v2_forward_smoke_report(
             logits_shape == expected_shape
             and logits_finite
             and len(layer_states) == int(model.config.num_layers)
+            and retnet_layer_count == expected_retnet_count
             and xlstm_count == expected_xlstm_count
         ),
         "logits_finite": logits_finite,
@@ -182,10 +194,18 @@ def run_lpt_v2_forward_smoke_report(
         "state_count": int(len(layer_states)),
         "attention_state_count": int(attention_count),
         "retnet_state_count": int(retnet_count),
+        "retnet_layer_state_count": int(retnet_layer_count),
+        "expected_retnet_layer_state_count": int(expected_retnet_count),
         "xlstm_state_count": int(xlstm_count),
         "expected_xlstm_state_count": int(expected_xlstm_count),
         "paged_kv_page_count": int(paged_kv_metadata.get("allocated_page_count", 0)),
         "model_size_preset": model.config.model_size_preset,
+        "retnet_assist_layers": model.config.retnet_assist_layers,
+        "retnet_assist_selected_layers": list(model.config.retnet_assist_selected_layers),
+        "retnet_adapter_rank": int(model.config.retnet_adapter_rank),
+        "retnet_parameter_sharing": model.config.retnet_parameter_sharing,
+        "retnet_state_sharing": model.config.retnet_state_sharing,
+        "retnet_sharing_group_size": int(model.config.retnet_sharing_group_size),
         "retnet_assist_mode": model.config.retnet_assist_mode,
         "retnet_adapter_target": list(model.config.retnet_adapter_target),
         "retnet_k_adapter_enabled": bool(model.config.retnet_k_adapter_enabled),

@@ -32,6 +32,7 @@ def build_tiny_config():
         attention_window_size=4,
         page_block_size=2,
         retnet_assist_layers="all_layers",
+        retnet_state_sharing="per_layer",
         retnet_state_dim=4,
         retnet_adapter_rank=2,
         moe_num_experts=2,

@@ -90,10 +90,23 @@ class RetNetAssistStatePool:
     Paged KV 裁剪和释放不经过本池；request 结束时应显式调用 release/reset。
     """
 
-    def __init__(self, num_layers):
+    def __init__(self, num_layers, *, layer_to_state_slot=None, state_slot_count=None):
         self.num_layers = int(num_layers)
         if self.num_layers <= 0:
             raise ValueError("num_layers 必须为正整数。")
+        if layer_to_state_slot is None:
+            normalized_slots = tuple(range(self.num_layers))
+        else:
+            normalized_slots = tuple(int(value) for value in layer_to_state_slot)
+            if len(normalized_slots) != self.num_layers:
+                raise ValueError("layer_to_state_slot 长度必须等于 num_layers。")
+            if any(value < 0 for value in normalized_slots):
+                raise ValueError("layer_to_state_slot 不能包含负数。")
+        self.layer_to_state_slot = normalized_slots
+        inferred_slot_count = 0 if not normalized_slots else max(normalized_slots) + 1
+        self.state_slot_count = int(inferred_slot_count if state_slot_count is None else state_slot_count)
+        if self.state_slot_count <= 0:
+            raise ValueError("state_slot_count 必须为正整数。")
         self._states: dict[tuple[str, int], RetNetAssistState] = {}
         self._metadata: dict[str, RetNetAssistPoolMetadata] = {}
 
@@ -145,37 +158,38 @@ class RetNetAssistStatePool:
             raise ValueError("layer_states 数量必须等于状态池 num_layers。")
 
         max_token_count = 0
-        state_count = 0
+        state_slots = set()
         for layer_index, layer_state in enumerate(layer_states):
             if layer_state is None or layer_state.retnet_assist is None:
                 continue
             retnet_state = layer_state.retnet_assist
             if retnet_state.request_id != request_id:
                 raise ValueError("RetNetAssistState request_id 与状态池更新 request_id 不一致。")
-            if int(retnet_state.layer_index) != layer_index:
-                raise ValueError("RetNetAssistState layer_index 与所在层不一致。")
-            self._states[(request_id, layer_index)] = retnet_state
+            expected_slot = self.layer_to_state_slot[layer_index]
+            if int(retnet_state.state_slot) != expected_slot:
+                raise ValueError("RetNetAssistState state_slot 与状态池层映射不一致。")
+            self._states[(request_id, expected_slot)] = retnet_state
             max_token_count = max(max_token_count, int(retnet_state.token_count))
-            state_count += 1
+            state_slots.add(expected_slot)
 
         return self._set_metadata(
             request_id,
             phase=phase,
             token_count=max_token_count,
-            state_count=state_count,
+            state_count=len(state_slots),
         )
 
     def get(self, request_id, layer_index):
         request_id = _normalize_request_id(request_id)
         layer_index = int(layer_index)
-        return self._states.get((request_id, layer_index))
+        return self._states.get((request_id, self.layer_to_state_slot[layer_index]))
 
     def get_request_states(self, request_id):
         request_id = _normalize_request_id(request_id)
         return tuple(
-            self._states[(request_id, layer_index)]
-            for layer_index in range(self.num_layers)
-            if (request_id, layer_index) in self._states
+            self._states[(request_id, state_slot)]
+            for state_slot in range(self.state_slot_count)
+            if (request_id, state_slot) in self._states
         )
 
     def bind_to_layer_states(self, request_id, layer_states=None):
@@ -193,11 +207,17 @@ class RetNetAssistStatePool:
 
         merged_states = []
         for layer_index, layer_state in enumerate(normalized_states):
-            pooled_state = self._states.get((request_id, layer_index))
+            state_slot = self.layer_to_state_slot[layer_index]
+            pooled_state = self._states.get((request_id, state_slot))
             if pooled_state is None:
                 merged_states.append(layer_state)
             else:
-                merged_states.append(replace(layer_state, retnet_assist=pooled_state))
+                merged_states.append(
+                    replace(
+                        layer_state,
+                        retnet_assist=replace(pooled_state, layer_index=layer_index),
+                    )
+                )
         return tuple(merged_states)
 
     def mark_preempted(self, request_id):
@@ -253,6 +273,8 @@ class RetNetAssistStatePool:
     def to_runtime_metadata(self):
         return {
             "num_layers": self.num_layers,
+            "state_slot_count": self.state_slot_count,
+            "layer_to_state_slot": list(self.layer_to_state_slot),
             "request_count": self.request_count,
             "state_count": self.state_count,
             "requests": {

@@ -94,6 +94,7 @@ _LIST_LIKE_MODEL_CONFIG_FIELDS = (
     "longrope2_long_factors",
     "longrope2_mscale_factors",
     "attention_backend_priority",
+    "retnet_assist_selected_layers",
     "retnet_adapter_target",
     "xlstm_memory_adapter_beta_range",
     "xlstm_memory_selected_layers",
@@ -192,6 +193,47 @@ def is_valid_xlstm_memory_layer_policy(layer_policy):
     return interval is not None and interval > 0
 
 
+def is_valid_retnet_assist_layer_policy(layer_policy):
+    """判断 RetNetAssist 层启用策略是否为当前可执行口径。"""
+    policy = str(layer_policy)
+    if policy in {"disabled", "selected_layers"}:
+        return True
+    interval = _resolve_every_n_layers_interval(policy)
+    return interval is not None and interval > 0
+
+
+def is_retnet_assist_enabled_for_layer(config, layer_index):
+    """判断指定层是否启用 RetNetAssist。"""
+    if not bool(config.retnet_assist_enabled):
+        return False
+    policy = str(config.retnet_assist_layers)
+    if policy == "disabled":
+        return False
+    if policy == "selected_layers":
+        return int(layer_index) in config.retnet_assist_selected_layers
+    interval = _resolve_every_n_layers_interval(policy)
+    if interval is None or interval <= 0:
+        return False
+    return int(layer_index) % interval == 0
+
+
+def count_retnet_assist_enabled_layers(config):
+    """按 ModelConfig 统计实际启用 RetNetAssist 的层数。"""
+    if not bool(config.retnet_assist_enabled):
+        return 0
+    policy = str(config.retnet_assist_layers)
+    if policy == "disabled":
+        return 0
+    if policy == "all_layers":
+        return int(config.num_layers)
+    if policy == "selected_layers":
+        return len(config.retnet_assist_selected_layers)
+    interval = _resolve_every_n_layers_interval(policy)
+    if interval is None or interval <= 0:
+        return 0
+    return sum(1 for layer_index in range(int(config.num_layers)) if layer_index % interval == 0)
+
+
 def is_xlstm_memory_enabled_for_layer(config, layer_index):
     """判断指定层是否启用 xLSTMAssist。"""
     if not bool(config.xlstm_memory_enabled):
@@ -274,8 +316,12 @@ class ModelConfig:
     retnet_assist_mode: str = "q_adapter"
     # RetNetAssist 启用层策略，如 every_4_layers / selected_layers / all_layers。
     retnet_assist_layers: str = "every_4_layers"
+    # selected_layers 策略下显式启用的层号，0 基索引。
+    retnet_assist_selected_layers: tuple[int, ...] = field(default_factory=tuple)
     # RetNetAssist 参数共享策略，global 表示跨层共享一组参数。
     retnet_parameter_sharing: str = "global"
+    # RetNetAssist group sharing 的连续层分组大小。
+    retnet_sharing_group_size: int = 4
     # RetNetAssist 状态共享策略，group 表示按共享组维护状态。
     retnet_state_sharing: str = "group"
     # RetNetAssist prefill 扫描策略，要求支持 sequence parallel 友好的 chunkwise scan。
@@ -451,7 +497,14 @@ class ModelConfig:
         object.__setattr__(self, "retnet_assist_enabled", bool(self.retnet_assist_enabled))
         object.__setattr__(self, "retnet_assist_mode", str(self.retnet_assist_mode))
         object.__setattr__(self, "retnet_assist_layers", str(self.retnet_assist_layers))
+        selected_retnet_layers = tuple(int(value) for value in (_as_tuple(self.retnet_assist_selected_layers) or ()))
+        if len(set(selected_retnet_layers)) != len(selected_retnet_layers):
+            raise ValueError("retnet_assist_selected_layers 不能包含重复层号。")
+        if any(layer_index < 0 or layer_index >= self.num_layers for layer_index in selected_retnet_layers):
+            raise ValueError("retnet_assist_selected_layers 中的层号必须在 [0, num_layers) 范围内。")
+        object.__setattr__(self, "retnet_assist_selected_layers", tuple(sorted(selected_retnet_layers)))
         object.__setattr__(self, "retnet_parameter_sharing", str(self.retnet_parameter_sharing))
+        object.__setattr__(self, "retnet_sharing_group_size", int(self.retnet_sharing_group_size))
         object.__setattr__(self, "retnet_state_sharing", str(self.retnet_state_sharing))
         object.__setattr__(self, "retnet_prefill_scan_policy", str(self.retnet_prefill_scan_policy))
         object.__setattr__(self, "retnet_sequence_parallel_policy", str(self.retnet_sequence_parallel_policy))
@@ -619,6 +672,8 @@ class ModelConfig:
             object.__setattr__(self, "hidden_size", normalized_hidden_size)
 
         normalized_layer_block_types = tuple(str(value) for value in self.layer_block_types)
+        if len(normalized_layer_block_types) != self.num_layers and normalized_layer_block_types == DEFAULT_LAYER_BLOCK_TYPES:
+            normalized_layer_block_types = tuple(ATTENTION_BLOCK_TYPE for _ in range(int(self.num_layers)))
         if len(normalized_layer_block_types) != self.num_layers:
             raise ValueError(
                 f"layer_block_types 长度 ({len(normalized_layer_block_types)}) "
@@ -712,10 +767,24 @@ class ModelConfig:
 
         if self.retnet_assist_mode not in {"q_adapter", "qk_adapter"}:
             raise ValueError("retnet_assist_mode 必须是 q_adapter 或 qk_adapter。")
-        if self.retnet_parameter_sharing not in {"global", "group"}:
-            raise ValueError("retnet_parameter_sharing 必须是 global 或 group。")
+        if self.retnet_parameter_sharing not in {"global", "group", "per_layer"}:
+            raise ValueError("retnet_parameter_sharing 必须是 global、group 或 per_layer。")
+        if self.retnet_sharing_group_size <= 0:
+            raise ValueError("retnet_sharing_group_size 必须为正整数。")
         if self.retnet_state_sharing not in {"group", "per_layer"}:
             raise ValueError("retnet_state_sharing 必须是 group 或 per_layer。")
+        if not is_valid_retnet_assist_layer_policy(self.retnet_assist_layers):
+            raise ValueError(
+                "retnet_assist_layers 必须是 disabled、all_layers、every_n_layers、"
+                "every_<正整数>_layers 或 selected_layers。"
+            )
+        if self.retnet_assist_layers == "selected_layers":
+            if not self.retnet_assist_selected_layers:
+                raise ValueError("retnet_assist_layers=selected_layers 时必须配置 retnet_assist_selected_layers。")
+        elif self.retnet_assist_selected_layers:
+            raise ValueError("retnet_assist_selected_layers 只能在 selected_layers 策略下配置。")
+        if self.retnet_assist_enabled and self.retnet_assist_layers == "disabled":
+            raise ValueError("retnet_assist_enabled=true 时 retnet_assist_layers 不能是 disabled。")
         if self.retnet_state_lifecycle != "request_bound_state_pool":
             raise ValueError("retnet_state_lifecycle 必须是 request_bound_state_pool。")
         if self.retnet_state_dim <= 0:

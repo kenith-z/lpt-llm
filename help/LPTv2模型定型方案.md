@@ -21,7 +21,7 @@ LPT v2 定型为 `Attention-First + RetNetAssist-Q + Paged KV + Memory-Augmented
 - `Paged KV Cache` 只用于 prefill/decode 状态续接；训练 forward 固定关闭 KV cache，不向 page pool 写入训练 K/V。
 - `RetNetAssist` 只维护轻量全局摘要，并通过低秩 `Q Adapter` 调制当前 token 的 `query`。
 - `RetNetAssist` 不调制 `key/value`，不写入 Paged KV，不直接注入 block 输出。
-- `RetNetAssist` 参数跨层共享，状态按启用层或 layer group 独立维护。
+- `RetNetAssist` 参数默认跨层共享，并支持按 layer group 或 per-layer 共享策略评估；状态按启用层或 layer group 维护。
 - `RetNetAssist` 与 `xLSTMAssist` 使用独立 request-bound state pool，Paged KV page 裁剪不触发 Assist state 释放或重置。
 - `RetNetAssist` 只读取 Attention 前的归一化特征，`xLSTMAssist` 只读取 FFN 前的归一化特征，两条记忆路径不互相消费对方状态。
 - FFN 层使用同质 `SwiGLU-MoE`，所有 MoE experts 都是无状态 SwiGLU。
@@ -62,7 +62,7 @@ RMSNorm_1                                                        │
 ║ [RetNetAssist，全局轻量摘要]                                  ║ │
 ║   s_t = SharedRetNetSummary(s_{t-1}, x_norm)                   ║ │
 ║   z_t = LowRankProject(s_t)                                    ║ │
-║   参数: 跨层共享；支持按 layer group 共享                       ║ │
+║   参数: 跨层共享；支持按 layer group 或 per-layer 共享          ║ │
 ║   状态: 按启用层或 layer group 独立维护                        ║ │
 ║   Prefill: SP-compatible parallel/chunkwise scan                ║ │
 ║   Decode: recurrent update                                     ║ │
@@ -237,7 +237,9 @@ cla_share_every_n_layers = 1
 retnet_assist_enabled = true
 retnet_assist_mode = "q_adapter"
 retnet_assist_layers = "every_4_layers | selected_layers | all_layers"
-retnet_parameter_sharing = "global | group"
+retnet_assist_selected_layers = [] | [0, 4, 8, 12, 16, 20]
+retnet_parameter_sharing = "global | group | per_layer"
+retnet_sharing_group_size = 4
 retnet_state_sharing = "group | per_layer"
 retnet_prefill_scan_policy = "sp_compatible_chunkwise_scan"
 retnet_sequence_parallel_policy = "ring_state_handoff | disabled"
@@ -305,6 +307,7 @@ moe_router_warmup_policy = "standard_balance_only"
 - `xlstm_memory_layers="selected_layers"` 时必须配置 0 基索引的 `xlstm_memory_selected_layers`；其它策略下该字段必须为空。
 - `every_n_layers` 是历史兼容别名，当前按每 1 层启用处理；正式层频率实验使用 `every_2_layers`、`every_4_layers` 这类显式策略。
 - `xlstm_memory_as_router_target=false` 表示 xLSTMAssist 不参与 expert 选择目标，与 Router 输入模式独立。
+- `retnet_parameter_sharing` 只允许 `global`、`group` 或 `per_layer`；`group` 当前使用连续 4 层一组，避免与第 26 项启用层/rank 维度混合。
 - `retnet_state_sharing` 只允许 `group` 或 `per_layer`，所有 RetNetAssist state 都绑定 request state pool。
 - `xlstm_memory_state_decay_interval` 按 token 计数触发；边界 reset 使用 `zero_state`。
 - `Paged KV`、`RetNetAssistState`、`xLSTMMemoryState` 三类状态池独立分配、独立释放。
@@ -547,13 +550,15 @@ help/LPTv2扩展实验/27_context_adapter/LPTv2_27_context_adapter_实验报告.
   - 成功标准：基于训练后的 `artifacts/lpt_v2/text_pretrain` 建立 `exp_24_qk_adapter` 单项分支继续训练；K 注入在 sliding window 下收益稳定且成本可控，才允许进入主干；必须产出对应实验报告。
   - 当前结果：已完成 `base_continued` 与 `exp_24_qk_adapter` 两分支 1164 step chat SFT 对比，并完成 checkpoint validate、真实 checkpoint forward smoke、长上下文代理和资源评测。Q/K 分支 eval loss 更低且 K adapter norm 可观测，但长上下文代理 loss 与 needle logprob 退化，router z-loss 明显升高；结论为暂不进入主干或组合实验，只作为归档对照保留。
 
-- [ ] 25. 评估 RetNetAssist 参数与状态共享策略
+- [x] 25. 评估 RetNetAssist 参数与状态共享策略
   - 范围：参数 `global sharing / group sharing / per-layer`，状态 `group / per_layer`。
   - 成功标准：选择质量收益、状态语义和参数成本最优的共享策略。
+  - 当前结果：已完成 `base_continued(global/group)`、`exp_25_global_per_layer`、`exp_25_group_group`、`exp_25_per_layer_per_layer` 四分支 1164 step chat SFT 对比，并完成 checkpoint validate、forward smoke、4100 长上下文代理和资源评测。`global/per_layer` 的 eval loss 最低且不增加 RetNet 参数，runtime state bytes 绝对值很小，作为后续组合实验中的 RetNetAssist 共享策略候选；`global/group` 保留为低状态成本 fallback；`group/group` 与 `per_layer/per_layer` 不进入默认主干。长上下文代理均跨过 2048 窗口并通过机制准入，但本项不单独作为长上下文定型充分证据。
 
-- [ ] 26. 评估 RetNetAssist 启用层与 rank
-  - 范围：`all_layers / every_2_layers / every_4_layers / selected_layers`，rank 8/16/32。
+- [x] 26. 评估 RetNetAssist 启用层与 rank
+  - 范围：`all_layers / every_2_layers / every_4_layers / selected_layers`，rank 16/32。
   - 成功标准：基于训练后的 `artifacts/lpt_v2/text_pretrain` 建立 `exp_26_retnet_layers_rank` 单项分支继续训练；一次只改启用层或 rank 一个维度，找到质量收益与计算成本的最小可用配置；必须产出对应实验报告。
+  - 当前结果：已完成 `base_continued(all_layers/rank16)`、`exp_26_retnet_every_2_layers`、`exp_26_retnet_every_4_layers`、`exp_26_retnet_selected_offset_layers`、`exp_26_retnet_rank32` 五分支 1164 step chat SFT 对比，并完成 checkpoint validate、forward smoke、4100 长上下文代理和资源评测。`every_4_layers/rank16` 的 4100 long loss 最低、训练吞吐最高且训练显存峰值最低，调整为后续组合实验主候选；`every_2_layers/rank16` 的 eval loss 最低，但长上下文代理退化，保留为质量对照/备选；`rank32` 未带来 eval 收益，不进入默认主干。本项仍保持 `global/group` 共享策略，最终主干需与第 25 项 `global/per_layer` 组合后再确认。
 
 - [ ] 27. 评估 RetNetContextAdapter
   - 范围：`x = x + alpha_context * Adapter_Context(z_t)` 或 FFN 输入调制，不新增第二套检索状态。

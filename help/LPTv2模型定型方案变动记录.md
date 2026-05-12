@@ -2,8 +2,22 @@
 
 本文只记录 LPT v2 定型方案的历史变动。当前实现与任务拆解以 `help/LPTv2模型定型方案.md` 为准。
 
+## 2026-05-13
+
+- 完成第 26 项 `RetNetAssist 启用层与 rank` 五分支 1164 step chat SFT 对比，报告路径为 `help/LPTv2扩展实验/26_retnet_layers_rank/LPTv2_26_retnet_layers_rank_实验报告.md`；`base_continued(all_layers/rank16)`、`exp_26_retnet_every_2_layers`、`exp_26_retnet_every_4_layers`、`exp_26_retnet_selected_offset_layers`、`exp_26_retnet_rank32` 均通过 checkpoint validate、真实 checkpoint forward smoke、4100 长上下文代理和资源评测。
+- 第 26 项结论调整为：`every_4_layers/rank16` 的 4100 long loss 最低、训练吞吐最高且训练显存峰值最低，作为后续组合实验主候选；`every_2_layers/rank16` 的 eval loss 最低，但长上下文代理退化，保留为质量对照/备选；`rank32` 未带来 eval 收益，不进入默认主干。
+- 保留组合限制：第 26 项为单项归因，仍保持 `global/group` 共享策略；后续组合实验优先验证第 25 项 `global/per_layer` 与第 26 项 `every_4_layers` 的交互效果，并保留 `every_2_layers` 作为质量对照。
+
+## 2026-05-12
+
+- 完成第 25 项 `RetNetAssist 参数与状态共享策略` 四分支 1164 step chat SFT 对比，报告路径为 `help/LPTv2扩展实验/25_retnet_sharing/LPTv2_25_retnet_sharing_实验报告.md`；`base_continued(global/group)`、`exp_25_global_per_layer`、`exp_25_group_group`、`exp_25_per_layer_per_layer` 均通过 checkpoint validate、真实 checkpoint forward smoke、4100 长上下文代理和资源评测。
+- 第 25 项结论调整为：`global/per_layer` 的 eval loss 最低，且不增加 RetNet 物理参数，runtime state bytes 绝对值很小，作为后续组合实验中的 RetNetAssist 共享策略候选；`global/group` 保留为低状态成本 fallback，`group/group` 和 `per_layer/per_layer` 不进入默认主干。
+- 保留长上下文限制：四个分支 4100 长上下文评测均跨过 2048 窗口并通过机制准入，但质量代理没有单一完全胜者，因此第 25 项不单独作为长上下文定型充分证据，需等待第 26/27 项及组合实验联合确认。
+- 完成第 26 项 `RetNetAssist 启用层与 rank` 的代码与工具准备：新增 `retnet_assist_selected_layers`、RetNet enabled-layer 统计、稀疏启用层不挂载 RetNetAssist 参数、rank32 初始化权重过滤、`tools/init_lpt_v2_exp26_branches.py`、`data/manifests/chat_sft_eval_exp26.json` 和 `help/LPTv2扩展实验/26_retnet_layers_rank/LPTv2_26_retnet_layers_rank_实验报告.md`；训练仍由人工按报告命令执行。
+
 ## 2026-05-11
 
+- 完成第 25 项 `RetNetAssist 参数与状态共享策略` 的代码与工具准备：新增真实 `retnet_parameter_sharing="global|group|per_layer"`、`retnet_state_sharing="group|per_layer"` 和 `retnet_sharing_group_size=4` 接入，RetNet state pool 改为按 `state_slot` 存取；新增 `tools/init_lpt_v2_exp25_branches.py`、`data/manifests/chat_sft_eval_exp25.json` 和 `help/LPTv2扩展实验/25_retnet_sharing/LPTv2_25_retnet_sharing_实验报告.md`。
 - 补齐 v2 评测工具缺口：新增 `tools/benchmark_lpt_v2_sequence_packing.py`，用于对同一批 chat/text 样本比较 sequence packing 开关下的 token 利用率、吞吐、step 耗时和 CUDA peak memory。
 - 完成 LongRoPE2 短期与中期评测补充：新增 `tools/run_lpt_v2_longrope2_factor_sweep.py`、`lpt_eval/longrope2_factor_sweep.py`、`tools/run_lpt_v2_long_context_suite.py` 和 `lpt_eval/long_context_suite.py`；factor sweep 只在评测进程内临时替换 factors，不写回 checkpoint。
 - 长上下文准入新增 `needle_depth`，单次评测、suite 与 factor sweep 统一复用真实 checkpoint 准入口径，便于第 22/23/24 项之后补充多位置 needle 和 LongRoPE2 因子对照。

@@ -149,6 +149,7 @@ class RetNetAssistState:
 
     request_id: str
     layer_index: int
+    state_slot: int | None = None
     summary: Any = None
     token_count: int = 0
     summary_norm: float | None = None
@@ -162,6 +163,10 @@ class RetNetAssistState:
     def __post_init__(self):
         object.__setattr__(self, "request_id", _normalize_request_id(self.request_id))
         object.__setattr__(self, "layer_index", int(self.layer_index))
+        state_slot = self.layer_index if self.state_slot is None else int(self.state_slot)
+        if state_slot < 0:
+            raise ValueError("state_slot 不能为负数。")
+        object.__setattr__(self, "state_slot", state_slot)
         object.__setattr__(self, "token_count", int(self.token_count))
         if self.token_count < 0:
             raise ValueError("token_count 不能为负数。")
@@ -191,6 +196,7 @@ class RetNetAssistState:
             "state_type": self.state_type,
             "request_id": self.request_id,
             "layer_index": self.layer_index,
+            "state_slot": self.state_slot,
             "token_count": self.token_count,
             "summary_norm": self.summary_norm,
             "q_adapter_delta_norm": self.q_adapter_delta_norm,

@@ -8,7 +8,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from lpt_config import LongContextEvalConfig
+from lpt_config import LongContextEvalConfig, count_retnet_assist_enabled_layers
 from lpt_config.profiles import LPT_V2_ASSIST_PROFILE, LPT_V2_PAGED_KV_PROFILE, build_lpt_v2_profile_config
 from lpt_model import LPTV2, load_lpt_v2_checkpoint
 
@@ -39,6 +39,115 @@ def _target_logprob(logits, target_token_id):
     return float(log_probs[int(target_token_id)].detach().cpu())
 
 
+def _mean_optional(values):
+    values = [float(value) for value in values if value is not None]
+    return 0.0 if not values else sum(values) / len(values)
+
+
+def _collect_retnet_mechanism(states):
+    """从所有启用层汇总 RetNetAssist 机制指标，避免稀疏启用层被第 0 层误判。"""
+    retnet_states = [
+        (layer_index, layer_state.retnet_assist)
+        for layer_index, layer_state in enumerate(states)
+        if layer_state.retnet_assist is not None
+    ]
+    if not retnet_states:
+        return {
+            "first_layer_index": None,
+            "token_count": 0,
+            "q_adapter_delta_norm": 0.0,
+            "k_adapter_delta_norm": 0.0,
+        }
+    return {
+        "first_layer_index": int(retnet_states[0][0]),
+        "token_count": max(int(state.token_count) for _, state in retnet_states),
+        "q_adapter_delta_norm": _mean_optional(state.q_adapter_delta_norm for _, state in retnet_states),
+        "k_adapter_delta_norm": _mean_optional(state.k_adapter_delta_norm for _, state in retnet_states),
+    }
+
+
+def _resolve_needle_index(sequence_length, needle_depth):
+    """根据 depth 把 needle 放到序列内部，首尾各保留一个控制位置。"""
+    depth = min(max(float(needle_depth), 0.0), 1.0)
+    last_allowed_index = max(1, int(sequence_length) - 2)
+    if last_allowed_index <= 1:
+        return 1
+    return 1 + int(round((last_allowed_index - 1) * depth))
+
+
+def _release_model_request_state(model, request_id):
+    """释放一次评测写入的 request-bound 状态，避免 suite 循环时累积显存。"""
+    if hasattr(model, "reset_request_state"):
+        model.reset_request_state(request_id=request_id)
+    if hasattr(model, "release_retnet_assist_state"):
+        model.release_retnet_assist_state(request_id=request_id, reason="eval_finished")
+    if hasattr(model, "release_xlstm_memory_state"):
+        model.release_xlstm_memory_state(request_id=request_id, reason="eval_finished")
+
+
+def _build_probe_inputs(*, vocabulary_size, sequence_length, attention_window_size, needle_depth, device):
+    """构造长上下文、代码数学和格式代理输入。"""
+    needle_token_id = max(1, int(vocabulary_size) - 3)
+    needle_index = _resolve_needle_index(sequence_length, needle_depth)
+    input_ids = build_deterministic_input(
+        vocabulary_size,
+        1,
+        sequence_length,
+        offset=7,
+        device=device,
+    )
+    input_ids[0, needle_index] = needle_token_id
+    input_ids[0, -1] = 2
+    code_math_ids = build_deterministic_input(
+        vocabulary_size,
+        1,
+        min(sequence_length, attention_window_size + 4),
+        offset=17,
+        device=device,
+    )
+    format_ids = build_deterministic_input(
+        vocabulary_size,
+        1,
+        min(sequence_length, attention_window_size + 2),
+        offset=31,
+        device=device,
+    )
+    return input_ids, code_math_ids, format_ids, needle_token_id, needle_index
+
+
+def _run_model_probe(model, *, input_ids, code_math_ids, format_ids, needle_token_id, request_id):
+    """对单个模型执行一次长上下文代理评测。"""
+    _release_model_request_state(model, request_id)
+    try:
+        with torch.no_grad():
+            logits, states = model.prefill(input_ids, request_id=request_id)
+            loss, ppl = next_token_loss(logits, input_ids)
+            code_logits, _ = model(
+                code_math_ids,
+                request_id=f"{request_id}-code",
+                use_kv_cache=False,
+            )
+            format_logits, _ = model(
+                format_ids,
+                request_id=f"{request_id}-format",
+                use_kv_cache=False,
+            )
+            code_loss, _ = next_token_loss(code_logits, code_math_ids)
+            format_loss, _ = next_token_loss(format_logits, format_ids)
+    finally:
+        _release_model_request_state(model, request_id)
+    return {
+        "logits": logits,
+        "states": states,
+        "loss": loss,
+        "ppl": ppl,
+        "rank": _target_rank(logits, needle_token_id),
+        "logprob": _target_logprob(logits, needle_token_id),
+        "code_loss": code_loss,
+        "format_loss": format_loss,
+    }
+
+
 @dataclass(frozen=True)
 class LongContextAdmissionReport:
     """长上下文准入报告。"""
@@ -49,6 +158,7 @@ class LongContextAdmissionReport:
     vocabulary_size: int
     sequence_length: int
     attention_window_size: int
+    needle_depth: float
     metrics: dict
     checkpoint_path: str | None = None
     checkpoint_metadata: dict | None = None
@@ -62,6 +172,7 @@ class LongContextAdmissionReport:
             "vocabulary_size": self.vocabulary_size,
             "sequence_length": self.sequence_length,
             "attention_window_size": self.attention_window_size,
+            "needle_depth": self.needle_depth,
             "metrics": dict(self.metrics),
         }
         if self.checkpoint_path is not None:
@@ -94,6 +205,7 @@ class LongContextAdmissionReport:
             f"- dtype: `{self.dtype}`",
             f"- sequence_length: `{self.sequence_length}`",
             f"- attention_window_size: `{self.attention_window_size}`",
+            f"- needle_depth: `{self.needle_depth}`",
             *checkpoint_lines,
             "",
             "| metric | assist | no_assist | delta |",
@@ -148,9 +260,35 @@ def _run_checkpoint_admission(
     attention_window_size,
     device,
     dtype,
+    needle_depth,
 ):
     loaded = load_lpt_v2_checkpoint(checkpoint_path, map_location="cpu", strict=True)
-    model = loaded.model
+    return run_lpt_v2_long_context_admission_for_model(
+        model=loaded.model,
+        preset=loaded.checkpoint["model_config"].get("model_size_preset", "checkpoint"),
+        checkpoint_path=checkpoint_path,
+        checkpoint_metadata=_checkpoint_training_metadata(loaded.checkpoint),
+        sequence_length=sequence_length,
+        attention_window_size=attention_window_size,
+        device=device,
+        dtype=dtype,
+        needle_depth=needle_depth,
+    )
+
+
+def run_lpt_v2_long_context_admission_for_model(
+    *,
+    model,
+    preset="checkpoint",
+    sequence_length=None,
+    attention_window_size=None,
+    device=DEFAULT_LONG_CONTEXT_EVAL_CONFIG.device,
+    dtype=DEFAULT_LONG_CONTEXT_EVAL_CONFIG.dtype,
+    needle_depth=0.0,
+    checkpoint_path=None,
+    checkpoint_metadata=None,
+):
+    """对已构造好的 LPTV2 模型运行 checkpoint 口径长上下文准入。"""
     target_device = resolve_eval_device(device)
     target_dtype = resolve_eval_dtype(dtype, device=target_device)
     model.to(device=target_device, dtype=target_dtype).eval()
@@ -161,46 +299,35 @@ def _run_checkpoint_admission(
     if sequence_length <= attention_window_size:
         raise ValueError("sequence_length 必须大于 attention_window_size，才能验证窗口外信息。")
 
-    needle_token_id = max(1, vocabulary_size - 3)
-    input_ids = build_deterministic_input(
-        vocabulary_size,
-        1,
-        sequence_length,
-        offset=7,
-        device=target_device,
-    )
-    input_ids[0, 1] = needle_token_id
-    input_ids[0, -1] = 2
-    code_math_ids = build_deterministic_input(
-        vocabulary_size,
-        1,
-        min(sequence_length, attention_window_size + 4),
-        offset=17,
-        device=target_device,
-    )
-    format_ids = build_deterministic_input(
-        vocabulary_size,
-        1,
-        min(sequence_length, attention_window_size + 2),
-        offset=31,
-        device=target_device,
-    )
+    from lpt_config import GlobalConfig
 
-    with torch.no_grad():
-        logits, states = model.prefill(input_ids, request_id="long-context-checkpoint")
-        loss, ppl = next_token_loss(logits, input_ids)
-        code_loss, _ = next_token_loss(model(code_math_ids)[0], code_math_ids)
-        format_loss, _ = next_token_loss(model(format_ids)[0], format_ids)
+    GlobalConfig.inference_rope_cache_max_sequence_length = max(
+        int(GlobalConfig.inference_rope_cache_max_sequence_length),
+        int(sequence_length),
+    )
+    input_ids, code_math_ids, format_ids, needle_token_id, needle_index = _build_probe_inputs(
+        vocabulary_size=vocabulary_size,
+        sequence_length=sequence_length,
+        attention_window_size=attention_window_size,
+        needle_depth=needle_depth,
+        device=target_device,
+    )
+    result = _run_model_probe(
+        model,
+        input_ids=input_ids,
+        code_math_ids=code_math_ids,
+        format_ids=format_ids,
+        needle_token_id=needle_token_id,
+        request_id="long-context-checkpoint",
+    )
     if target_device.type == "cuda":
         torch.cuda.synchronize(target_device)
 
-    retnet_tokens = 0
-    q_adapter_delta_norm = 0.0
-    k_adapter_delta_norm = 0.0
-    if states[0].retnet_assist is not None:
-        retnet_tokens = int(states[0].retnet_assist.token_count)
-        q_adapter_delta_norm = float(states[0].retnet_assist.q_adapter_delta_norm or 0.0)
-        k_adapter_delta_norm = float(states[0].retnet_assist.k_adapter_delta_norm or 0.0)
+    states = result["states"]
+    retnet_mechanism = _collect_retnet_mechanism(states)
+    retnet_tokens = int(retnet_mechanism["token_count"])
+    q_adapter_delta_norm = float(retnet_mechanism["q_adapter_delta_norm"])
+    k_adapter_delta_norm = float(retnet_mechanism["k_adapter_delta_norm"])
     paged_window = int(states[0].attention.paged_kv_ref.window_token_count)
     mechanism_ready = bool(retnet_tokens > paged_window)
     status = "admit_checkpoint_path" if mechanism_ready else "close_or_debug"
@@ -209,37 +336,38 @@ def _run_checkpoint_admission(
         if mechanism_ready
         else "checkpoint 可加载但长上下文状态未跨越局部窗口，应检查配置或输入长度。"
     )
-    assist_rank = _target_rank(logits, needle_token_id)
     metrics = {
         "needle": {
             "target_token_id": int(needle_token_id),
-            "assist_rank": assist_rank,
+            "needle_index": int(needle_index),
+            "needle_depth": float(needle_depth),
+            "assist_rank": result["rank"],
             "no_assist_rank": None,
             "rank_delta": None,
-            "assist_logprob": _target_logprob(logits, needle_token_id),
+            "assist_logprob": result["logprob"],
             "no_assist_logprob": None,
             "logprob_delta": None,
         },
         "long_text_ppl": {
-            "assist_loss": loss,
+            "assist_loss": result["loss"],
             "no_assist_loss": None,
-            "assist_ppl": ppl,
+            "assist_ppl": result["ppl"],
             "no_assist_ppl": None,
             "relative_delta": None,
         },
         "qa_retrieval": {
             "proxy": "needle_rank",
-            "assist_reciprocal_rank": 1.0 / max(1, assist_rank or 1),
+            "assist_reciprocal_rank": 1.0 / max(1, result["rank"] or 1),
             "no_assist_reciprocal_rank": None,
         },
         "code_math": {
             "proxy": "deterministic_pattern_next_token_loss",
-            "assist_loss": code_loss,
+            "assist_loss": result["code_loss"],
             "no_assist_loss": None,
         },
         "format_following": {
             "proxy": "structured_pattern_next_token_loss",
-            "assist_loss": format_loss,
+            "assist_loss": result["format_loss"],
             "no_assist_loss": None,
         },
         "mechanism": {
@@ -248,7 +376,15 @@ def _run_checkpoint_admission(
             "q_adapter_delta_norm": q_adapter_delta_norm,
             "k_adapter_delta_norm": k_adapter_delta_norm,
             "mechanism_ready": mechanism_ready,
+            "retnet_assist_layers": config.retnet_assist_layers,
+            "retnet_assist_selected_layers": list(config.retnet_assist_selected_layers),
+            "retnet_enabled_layer_count": count_retnet_assist_enabled_layers(config),
+            "retnet_first_enabled_layer": retnet_mechanism["first_layer_index"],
             "retnet_assist_mode": config.retnet_assist_mode,
+            "retnet_adapter_rank": int(config.retnet_adapter_rank),
+            "retnet_parameter_sharing": config.retnet_parameter_sharing,
+            "retnet_state_sharing": config.retnet_state_sharing,
+            "retnet_sharing_group_size": int(config.retnet_sharing_group_size),
             "retnet_adapter_target": list(config.retnet_adapter_target),
             "retnet_k_adapter_enabled": bool(config.retnet_k_adapter_enabled),
         },
@@ -258,15 +394,16 @@ def _run_checkpoint_admission(
         },
     }
     return LongContextAdmissionReport(
-        preset=loaded.checkpoint["model_config"].get("preset_name", "checkpoint"),
+        preset=str(preset),
         device=str(target_device),
         dtype=dtype_name(target_dtype),
         vocabulary_size=vocabulary_size,
         sequence_length=sequence_length,
         attention_window_size=attention_window_size,
+        needle_depth=float(needle_depth),
         metrics=metrics,
-        checkpoint_path=str(Path(checkpoint_path)),
-        checkpoint_metadata=_checkpoint_training_metadata(loaded.checkpoint),
+        checkpoint_path=None if checkpoint_path is None else str(Path(checkpoint_path)),
+        checkpoint_metadata=None if checkpoint_metadata is None else dict(checkpoint_metadata),
     )
 
 
@@ -280,6 +417,7 @@ def run_lpt_v2_long_context_admission(
     dtype=DEFAULT_LONG_CONTEXT_EVAL_CONFIG.dtype,
     seed=DEFAULT_LONG_CONTEXT_EVAL_CONFIG.seed,
     checkpoint_path=None,
+    needle_depth=0.0,
 ):
     """运行长上下文准入 smoke 评测。"""
     if checkpoint_path is not None:
@@ -289,6 +427,7 @@ def run_lpt_v2_long_context_admission(
             attention_window_size=attention_window_size,
             device=device,
             dtype=dtype,
+            needle_depth=needle_depth,
         )
 
     target_device = resolve_eval_device(device)
@@ -296,6 +435,13 @@ def run_lpt_v2_long_context_admission(
     sequence_length = int(sequence_length or attention_window_size * 2 + 4)
     if sequence_length <= attention_window_size:
         raise ValueError("sequence_length 必须大于 attention_window_size，才能验证窗口外信息。")
+
+    from lpt_config import GlobalConfig
+
+    GlobalConfig.inference_rope_cache_max_sequence_length = max(
+        int(GlobalConfig.inference_rope_cache_max_sequence_length),
+        int(sequence_length),
+    )
 
     common_overrides = {
         "attention_window_size": int(attention_window_size),
@@ -315,79 +461,73 @@ def run_lpt_v2_long_context_admission(
         **common_overrides,
     )
 
-    needle_token_id = max(1, int(vocabulary_size) - 3)
     set_eval_seed(seed)
     assist_model = LPTV2(vocabulary_size, assist_config).to(device=target_device, dtype=target_dtype).eval()
     set_eval_seed(seed)
     no_assist_model = LPTV2(vocabulary_size, no_assist_config).to(device=target_device, dtype=target_dtype).eval()
 
-    input_ids = build_deterministic_input(
-        vocabulary_size,
-        1,
-        sequence_length,
-        offset=7,
+    input_ids, code_math_ids, format_ids, needle_token_id, needle_index = _build_probe_inputs(
+        vocabulary_size=vocabulary_size,
+        sequence_length=sequence_length,
+        attention_window_size=attention_window_size,
+        needle_depth=needle_depth,
         device=target_device,
     )
-    input_ids[0, 1] = needle_token_id
-    input_ids[0, -1] = 2
-    code_math_ids = build_deterministic_input(
-        vocabulary_size,
-        1,
-        min(sequence_length, attention_window_size + 4),
-        offset=17,
-        device=target_device,
+    assist_result = _run_model_probe(
+        assist_model,
+        input_ids=input_ids,
+        code_math_ids=code_math_ids,
+        format_ids=format_ids,
+        needle_token_id=needle_token_id,
+        request_id="long-context-assist",
     )
-    format_ids = build_deterministic_input(
-        vocabulary_size,
-        1,
-        min(sequence_length, attention_window_size + 2),
-        offset=31,
-        device=target_device,
+    no_assist_result = _run_model_probe(
+        no_assist_model,
+        input_ids=input_ids,
+        code_math_ids=code_math_ids,
+        format_ids=format_ids,
+        needle_token_id=needle_token_id,
+        request_id="long-context-no-assist",
     )
-
-    with torch.no_grad():
-        assist_logits, assist_states = assist_model.prefill(input_ids, request_id="long-context-assist")
-        no_assist_logits, no_assist_states = no_assist_model.prefill(input_ids, request_id="long-context-no-assist")
-        assist_loss, assist_ppl = next_token_loss(assist_logits, input_ids)
-        no_assist_loss, no_assist_ppl = next_token_loss(no_assist_logits, input_ids)
-        assist_code_loss, _ = next_token_loss(assist_model(code_math_ids)[0], code_math_ids)
-        no_assist_code_loss, _ = next_token_loss(no_assist_model(code_math_ids)[0], code_math_ids)
-        assist_format_loss, _ = next_token_loss(assist_model(format_ids)[0], format_ids)
-        no_assist_format_loss, _ = next_token_loss(no_assist_model(format_ids)[0], format_ids)
     if target_device.type == "cuda":
         torch.cuda.synchronize(target_device)
 
+    assist_logits = assist_result["logits"]
+    no_assist_logits = no_assist_result["logits"]
+    assist_states = assist_result["states"]
     logit_delta_l2 = float((assist_logits.float() - no_assist_logits.float()).pow(2).mean().sqrt().detach().cpu())
-    retnet_tokens = 0
-    q_adapter_delta_norm = 0.0
-    k_adapter_delta_norm = 0.0
-    if assist_states[0].retnet_assist is not None:
-        retnet_tokens = int(assist_states[0].retnet_assist.token_count)
-        q_adapter_delta_norm = float(assist_states[0].retnet_assist.q_adapter_delta_norm or 0.0)
-        k_adapter_delta_norm = float(assist_states[0].retnet_assist.k_adapter_delta_norm or 0.0)
+    retnet_mechanism = _collect_retnet_mechanism(assist_states)
+    retnet_tokens = int(retnet_mechanism["token_count"])
+    q_adapter_delta_norm = float(retnet_mechanism["q_adapter_delta_norm"])
+    k_adapter_delta_norm = float(retnet_mechanism["k_adapter_delta_norm"])
     adapter_delta_l2 = 0.0
-    if assist_states[0].retnet_assist is not None and assist_states[0].retnet_assist.summary is not None:
-        q_adapter = assist_model.layers[0].attention_mixer.q_adapter
-        summary = assist_states[0].retnet_assist.summary[:, None].to(device=target_device, dtype=target_dtype)
-        dummy_query = torch.zeros(
-            1,
-            assist_config.num_heads,
-            1,
-            assist_config.head_dim,
-            device=target_device,
-            dtype=target_dtype,
-        )
-        adapted_query = q_adapter(summary, dummy_query)
-        adapter_delta_l2 = float(
-            (adapted_query.float() - dummy_query.float()).pow(2).mean().sqrt().detach().cpu()
-        )
+    alpha_q = 0.0
+    first_retnet_layer = retnet_mechanism["first_layer_index"]
+    if first_retnet_layer is not None:
+        first_state = assist_states[int(first_retnet_layer)].retnet_assist
+        q_adapter = assist_model.layers[int(first_retnet_layer)].attention_mixer.q_adapter
+        if first_state is not None and first_state.summary is not None and q_adapter is not None:
+            summary = first_state.summary[:, None].to(device=target_device, dtype=target_dtype)
+            alpha_q = float(q_adapter.alpha_q.detach().cpu())
+            dummy_query = torch.zeros(
+                1,
+                assist_config.num_heads,
+                1,
+                assist_config.head_dim,
+                device=target_device,
+                dtype=target_dtype,
+            )
+            adapted_query = q_adapter(summary, dummy_query)
+            adapter_delta_l2 = float(
+                (adapted_query.float() - dummy_query.float()).pow(2).mean().sqrt().detach().cpu()
+            )
     paged_window = int(assist_states[0].attention.paged_kv_ref.window_token_count)
     mechanism_ready = bool(
         retnet_tokens > paged_window
         and (logit_delta_l2 > 0.0 or adapter_delta_l2 > 0.0 or q_adapter_delta_norm > 0.0 or k_adapter_delta_norm > 0.0)
     )
 
-    relative_ppl_delta = float((assist_ppl - no_assist_ppl) / max(no_assist_ppl, 1e-9))
+    relative_ppl_delta = float((assist_result["ppl"] - no_assist_result["ppl"]) / max(no_assist_result["ppl"], 1e-9))
     if relative_ppl_delta < -0.01:
         status = "admit_quality_benefit"
         reason = "当前输入上 assist PPL 明显低于 no_assist，可进入更大评测。"
@@ -401,34 +541,36 @@ def run_lpt_v2_long_context_admission(
     metrics = {
         "needle": {
             "target_token_id": int(needle_token_id),
-            "assist_rank": _target_rank(assist_logits, needle_token_id),
-            "no_assist_rank": _target_rank(no_assist_logits, needle_token_id),
+            "needle_index": int(needle_index),
+            "needle_depth": float(needle_depth),
+            "assist_rank": assist_result["rank"],
+            "no_assist_rank": no_assist_result["rank"],
             "rank_delta": None,
-            "assist_logprob": _target_logprob(assist_logits, needle_token_id),
-            "no_assist_logprob": _target_logprob(no_assist_logits, needle_token_id),
+            "assist_logprob": assist_result["logprob"],
+            "no_assist_logprob": no_assist_result["logprob"],
             "logprob_delta": None,
         },
         "long_text_ppl": {
-            "assist_loss": assist_loss,
-            "no_assist_loss": no_assist_loss,
-            "assist_ppl": assist_ppl,
-            "no_assist_ppl": no_assist_ppl,
+            "assist_loss": assist_result["loss"],
+            "no_assist_loss": no_assist_result["loss"],
+            "assist_ppl": assist_result["ppl"],
+            "no_assist_ppl": no_assist_result["ppl"],
             "relative_delta": relative_ppl_delta,
         },
         "qa_retrieval": {
             "proxy": "needle_rank",
-            "assist_reciprocal_rank": 1.0 / max(1, _target_rank(assist_logits, needle_token_id)),
-            "no_assist_reciprocal_rank": 1.0 / max(1, _target_rank(no_assist_logits, needle_token_id)),
+            "assist_reciprocal_rank": 1.0 / max(1, assist_result["rank"]),
+            "no_assist_reciprocal_rank": 1.0 / max(1, no_assist_result["rank"]),
         },
         "code_math": {
             "proxy": "deterministic_pattern_next_token_loss",
-            "assist_loss": assist_code_loss,
-            "no_assist_loss": no_assist_code_loss,
+            "assist_loss": assist_result["code_loss"],
+            "no_assist_loss": no_assist_result["code_loss"],
         },
         "format_following": {
             "proxy": "structured_pattern_next_token_loss",
-            "assist_loss": assist_format_loss,
-            "no_assist_loss": no_assist_format_loss,
+            "assist_loss": assist_result["format_loss"],
+            "no_assist_loss": no_assist_result["format_loss"],
         },
         "mechanism": {
             "assist_retnet_token_count": retnet_tokens,
@@ -437,8 +579,16 @@ def run_lpt_v2_long_context_admission(
             "adapter_delta_l2": adapter_delta_l2,
             "q_adapter_delta_norm": q_adapter_delta_norm,
             "k_adapter_delta_norm": k_adapter_delta_norm,
-            "alpha_q": float(assist_model.layers[0].attention_mixer.q_adapter.alpha_q.detach().cpu()),
+            "alpha_q": alpha_q,
+            "retnet_assist_layers": assist_config.retnet_assist_layers,
+            "retnet_assist_selected_layers": list(assist_config.retnet_assist_selected_layers),
+            "retnet_enabled_layer_count": count_retnet_assist_enabled_layers(assist_config),
+            "retnet_first_enabled_layer": retnet_mechanism["first_layer_index"],
             "retnet_assist_mode": assist_config.retnet_assist_mode,
+            "retnet_adapter_rank": int(assist_config.retnet_adapter_rank),
+            "retnet_parameter_sharing": assist_config.retnet_parameter_sharing,
+            "retnet_state_sharing": assist_config.retnet_state_sharing,
+            "retnet_sharing_group_size": int(assist_config.retnet_sharing_group_size),
             "retnet_adapter_target": list(assist_config.retnet_adapter_target),
             "retnet_k_adapter_enabled": bool(assist_config.retnet_k_adapter_enabled),
             "mechanism_ready": mechanism_ready,
@@ -464,5 +614,6 @@ def run_lpt_v2_long_context_admission(
         vocabulary_size=int(vocabulary_size),
         sequence_length=sequence_length,
         attention_window_size=int(attention_window_size),
+        needle_depth=float(needle_depth),
         metrics=metrics,
     )

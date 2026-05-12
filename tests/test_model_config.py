@@ -1,5 +1,4 @@
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -16,6 +15,7 @@ from lpt_config import (
     LPT_V2_BLOCK_TYPE,
     LPT_V2_DEV_TINY_PRESET,
     LPT_V2_LARGE_PRESET,
+    LPT_V2_MODEL_SIZE_PRESETS,
     LPT_V2_SEQUENCE_MIXER_MODE,
     LPT_V2_SMALL_PRESET,
     MODEL_CONFIG_SCHEMA_VERSION,
@@ -23,11 +23,19 @@ from lpt_config import (
     PARAMETER_COUNT_MODES,
     build_lpt_v2_model_config_preset,
     build_model_config_from_checkpoint,
+    count_retnet_assist_enabled_layers,
     expand_lpt_v2_model_config_preset,
+    is_retnet_assist_enabled_for_layer,
     load_model_config_json,
     model_config_snapshot_path,
     normalize_model_config,
 )
+
+
+def build_workspace_tmp_dir(name):
+    path = PROJECT_ROOT / ".tmp_tests" / name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def build_tiny_attention_config():
@@ -54,13 +62,14 @@ class TestModelConfig(unittest.TestCase):
         self.assertEqual(config.attention_backend_priority, DEFAULT_ATTENTION_BACKEND_PRIORITY)
         self.assertEqual(config.attention_backend_priority, ("sdpa",))
         self.assertEqual(config.cla_share_every_n_layers, 1)
-        self.assertEqual(config.num_layers, 4)
-        self.assertEqual(config.hidden_size, 256)
-        self.assertEqual(config.num_heads, 4)
-        self.assertEqual(config.num_kv_heads, 2)
-        self.assertEqual(config.moe_num_experts, 2)
-        self.assertEqual(config.moe_top_k, 1)
-        self.assertEqual(config.attention_window_size, 512)
+        default_shape = LPT_V2_MODEL_SIZE_PRESETS[DEFAULT_MODEL_SIZE_PRESET]
+        self.assertEqual(config.num_layers, default_shape["num_layers"])
+        self.assertEqual(config.hidden_size, default_shape["num_heads"] * default_shape["head_dim"])
+        self.assertEqual(config.num_heads, default_shape["num_heads"])
+        self.assertEqual(config.num_kv_heads, default_shape["num_kv_heads"])
+        self.assertEqual(config.moe_num_experts, default_shape["moe_num_experts"])
+        self.assertEqual(config.moe_top_k, default_shape["moe_top_k"])
+        self.assertEqual(config.attention_window_size, default_shape["attention_window_size"])
         self.assertEqual(config.parameter_count_modes, PARAMETER_COUNT_MODES)
         self.assertTrue(all(block_type == "attention" for block_type in config.layer_block_types))
 
@@ -115,10 +124,9 @@ class TestModelConfig(unittest.TestCase):
             longrope2_mixed_original_window=1024,
         )
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            snapshot_path = Path(temp_dir) / "config" / "model_config.json"
-            config.save_json(snapshot_path)
-            loaded_config = load_model_config_json(snapshot_path)
+        snapshot_path = build_workspace_tmp_dir("model_config_json_round_trip") / "config" / "model_config.json"
+        config.save_json(snapshot_path)
+        loaded_config = load_model_config_json(snapshot_path)
 
         self.assertEqual(loaded_config, config)
 
@@ -234,6 +242,45 @@ class TestModelConfig(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     ModelConfig.from_preset(LPT_V2_DEV_TINY_PRESET, **payload)
 
+    def test_retnet_sharing_config_accepts_per_layer_and_rejects_bad_group_size(self):
+        config = ModelConfig.from_preset(
+            LPT_V2_DEV_TINY_PRESET,
+            retnet_parameter_sharing="per_layer",
+            retnet_state_sharing="per_layer",
+            retnet_sharing_group_size=2,
+        )
+
+        self.assertEqual(config.retnet_parameter_sharing, "per_layer")
+        self.assertEqual(config.retnet_state_sharing, "per_layer")
+        self.assertEqual(config.retnet_sharing_group_size, 2)
+
+        with self.assertRaises(ValueError):
+            ModelConfig.from_preset(LPT_V2_DEV_TINY_PRESET, retnet_sharing_group_size=0)
+
+    def test_retnet_selected_layers_are_validated_and_counted(self):
+        config = ModelConfig.from_preset(
+            LPT_V2_DEV_TINY_PRESET,
+            retnet_assist_layers="selected_layers",
+            retnet_assist_selected_layers=(3, 1),
+        )
+
+        self.assertEqual(config.retnet_assist_selected_layers, (1, 3))
+        self.assertEqual(count_retnet_assist_enabled_layers(config), 2)
+        self.assertFalse(is_retnet_assist_enabled_for_layer(config, 0))
+        self.assertTrue(is_retnet_assist_enabled_for_layer(config, 1))
+
+        with self.assertRaises(ValueError):
+            ModelConfig.from_preset(
+                LPT_V2_DEV_TINY_PRESET,
+                retnet_assist_layers="selected_layers",
+            )
+        with self.assertRaises(ValueError):
+            ModelConfig.from_preset(
+                LPT_V2_DEV_TINY_PRESET,
+                retnet_assist_layers="all_layers",
+                retnet_assist_selected_layers=(1,),
+            )
+
     def test_model_config_rejects_invalid_longrope2_embedding_mode(self):
         with self.assertRaises(ValueError):
             ModelConfig(longrope2_train_embedding_mode="unknown")
@@ -257,13 +304,12 @@ class TestModelConfig(unittest.TestCase):
         self.assertEqual(loaded_config, config)
 
     def test_load_model_config_json_rejects_unwrapped_payload(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            snapshot_path = Path(temp_dir) / "config" / "model_config.json"
-            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-            snapshot_path.write_text("{\"num_layers\": 2}", encoding="utf-8")
+        snapshot_path = build_workspace_tmp_dir("model_config_unwrapped_payload") / "config" / "model_config.json"
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_path.write_text("{\"num_layers\": 2}", encoding="utf-8")
 
-            with self.assertRaises(ValueError):
-                load_model_config_json(snapshot_path)
+        with self.assertRaises(ValueError):
+            load_model_config_json(snapshot_path)
 
     def test_model_config_snapshot_path_follows_artifact_convention(self):
         snapshot_path = model_config_snapshot_path("artifacts/lpt_v2/base")

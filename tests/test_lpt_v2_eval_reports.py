@@ -14,6 +14,8 @@ from lpt_eval import (
     run_lpt_v2_baselines,
     run_lpt_v2_forward_smoke_report,
     run_lpt_v2_long_context_admission,
+    run_lpt_v2_long_context_suite,
+    run_lpt_v2_longrope2_factor_sweep,
     run_lpt_v2_resource_report,
 )
 from lpt_config import GlobalConfig, ModelConfig
@@ -111,6 +113,56 @@ class TestLPTV2EvalReports(unittest.TestCase):
         self.assertEqual(payload["metrics"]["long_text_ppl"]["no_assist_ppl"], None)
         self.assertIn("checkpoint:", report.to_markdown())
 
+    def test_long_context_suite_runs_multiple_depths_on_checkpoint(self):
+        GlobalConfig.parameter_dtype = torch.float32
+        model = LPTV2(32, build_tiny_config())
+        checkpoint_path = build_workspace_tmp_dir("long_context_suite_checkpoint") / "model.pt"
+        save_lpt_v2_checkpoint(
+            model,
+            checkpoint_path,
+            extra_metadata={"training_stage": "unit_suite", "global_step": 1},
+        )
+
+        report = run_lpt_v2_long_context_suite(
+            checkpoint_path=checkpoint_path,
+            sequence_lengths=(10,),
+            attention_window_sizes=(4,),
+            needle_depths=(0.2, 0.8),
+            device="cpu",
+            dtype="fp32",
+        )
+
+        payload = report.to_dict()
+        self.assertEqual(payload["summary"]["case_count"], 2)
+        self.assertEqual(payload["needle_depths"], [0.2, 0.8])
+        self.assertIn("Long Context Suite", report.to_markdown())
+
+    def test_longrope2_factor_sweep_runs_bootstrap_candidate(self):
+        GlobalConfig.parameter_dtype = torch.float32
+        model = LPTV2(32, build_tiny_config())
+        checkpoint_path = build_workspace_tmp_dir("longrope2_sweep_checkpoint") / "model.pt"
+        save_lpt_v2_checkpoint(
+            model,
+            checkpoint_path,
+            extra_metadata={"training_stage": "unit_sweep", "global_step": 1},
+        )
+
+        report = run_lpt_v2_longrope2_factor_sweep(
+            checkpoint_path=checkpoint_path,
+            sequence_lengths=(10,),
+            attention_window_sizes=(4,),
+            needle_depths=(0.5,),
+            include_current=False,
+            include_bootstrap=True,
+            device="cpu",
+            dtype="fp32",
+        )
+
+        payload = report.to_dict()
+        self.assertEqual(payload["summary"]["candidate_count"], 1)
+        self.assertEqual(payload["candidates"][0]["candidate"]["name"], "bootstrap")
+        self.assertIn("Factor Sweep", report.to_markdown())
+
     def test_forward_smoke_loads_real_checkpoint(self):
         GlobalConfig.parameter_dtype = torch.float32
         model = LPTV2(
@@ -149,6 +201,7 @@ class TestLPTV2EvalReports(unittest.TestCase):
     def test_resource_report_contains_runtime_metrics(self):
         report = run_lpt_v2_resource_report(
             profile="lpt_v2_assist",
+            preset="lpt_v2_dev_tiny",
             vocabulary_size=32,
             sequence_length=4,
             decode_steps=2,
