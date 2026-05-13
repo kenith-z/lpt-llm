@@ -1,0 +1,540 @@
+{
+  "report_type": "lpt_v2_resource",
+  "profile": "checkpoint",
+  "preset": "lpt_v2_small_base",
+  "device": "cuda:0",
+  "dtype": "bfloat16",
+  "batch_size": 1,
+  "sequence_length": 16,
+  "decode_steps": 4,
+  "metrics": {
+    "prefill_tokens_per_sec": 30.27185831558131,
+    "decode_tokens_per_sec": 10.884946119493122,
+    "first_token_latency_ms": 81.99020000029122,
+    "per_layer_ms": [
+      {
+        "layer_index": 0,
+        "mean_ms": 75.89207999990322,
+        "calls": 5
+      },
+      {
+        "layer_index": 1,
+        "mean_ms": 4.155700000046636,
+        "calls": 5
+      },
+      {
+        "layer_index": 2,
+        "mean_ms": 3.3743599997251295,
+        "calls": 5
+      },
+      {
+        "layer_index": 3,
+        "mean_ms": 3.432480000265059,
+        "calls": 5
+      },
+      {
+        "layer_index": 4,
+        "mean_ms": 3.4582999996928265,
+        "calls": 5
+      },
+      {
+        "layer_index": 5,
+        "mean_ms": 3.5882599997421494,
+        "calls": 5
+      },
+      {
+        "layer_index": 6,
+        "mean_ms": 3.698659999645315,
+        "calls": 5
+      },
+      {
+        "layer_index": 7,
+        "mean_ms": 4.017820000080974,
+        "calls": 5
+      },
+      {
+        "layer_index": 8,
+        "mean_ms": 3.9183600005344488,
+        "calls": 5
+      },
+      {
+        "layer_index": 9,
+        "mean_ms": 3.49370000003546,
+        "calls": 5
+      },
+      {
+        "layer_index": 10,
+        "mean_ms": 3.3881399998790585,
+        "calls": 5
+      },
+      {
+        "layer_index": 11,
+        "mean_ms": 3.307159999894793,
+        "calls": 5
+      },
+      {
+        "layer_index": 12,
+        "mean_ms": 3.2973800003674114,
+        "calls": 5
+      },
+      {
+        "layer_index": 13,
+        "mean_ms": 3.518659999826923,
+        "calls": 5
+      },
+      {
+        "layer_index": 14,
+        "mean_ms": 4.254080000464455,
+        "calls": 5
+      },
+      {
+        "layer_index": 15,
+        "mean_ms": 5.100420000235317,
+        "calls": 5
+      },
+      {
+        "layer_index": 16,
+        "mean_ms": 4.486240000187536,
+        "calls": 5
+      },
+      {
+        "layer_index": 17,
+        "mean_ms": 4.044960000101128,
+        "calls": 5
+      },
+      {
+        "layer_index": 18,
+        "mean_ms": 3.5632600000099046,
+        "calls": 5
+      },
+      {
+        "layer_index": 19,
+        "mean_ms": 3.200019999712822,
+        "calls": 5
+      },
+      {
+        "layer_index": 20,
+        "mean_ms": 3.2175200001802295,
+        "calls": 5
+      },
+      {
+        "layer_index": 21,
+        "mean_ms": 3.6997999995946884,
+        "calls": 5
+      },
+      {
+        "layer_index": 22,
+        "mean_ms": 3.515559999505058,
+        "calls": 5
+      },
+      {
+        "layer_index": 23,
+        "mean_ms": 3.805419999480364,
+        "calls": 5
+      }
+    ],
+    "peak_memory_bytes": 2900479488,
+    "paged_kv_page_bytes": 491520,
+    "paged_kv_runtime_metadata": {
+      "cache_backend": "paged_kv",
+      "page_block_size": 256,
+      "attention_window_size": 2048,
+      "allocated_page_count": 24,
+      "allocated_bytes": 491520,
+      "request_layers": [
+        {
+          "request_id": "resource-report",
+          "layer_index": 0,
+          "page_ids": [
+            97
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 1,
+          "page_ids": [
+            98
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 2,
+          "page_ids": [
+            99
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 3,
+          "page_ids": [
+            100
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 4,
+          "page_ids": [
+            101
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 5,
+          "page_ids": [
+            102
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 6,
+          "page_ids": [
+            103
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 7,
+          "page_ids": [
+            104
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 8,
+          "page_ids": [
+            105
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 9,
+          "page_ids": [
+            106
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 10,
+          "page_ids": [
+            107
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 11,
+          "page_ids": [
+            108
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 12,
+          "page_ids": [
+            109
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 13,
+          "page_ids": [
+            110
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 14,
+          "page_ids": [
+            111
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 15,
+          "page_ids": [
+            112
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 16,
+          "page_ids": [
+            113
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 17,
+          "page_ids": [
+            114
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 18,
+          "page_ids": [
+            115
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 19,
+          "page_ids": [
+            116
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 20,
+          "page_ids": [
+            117
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 21,
+          "page_ids": [
+            118
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 22,
+          "page_ids": [
+            119
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        },
+        {
+          "request_id": "resource-report",
+          "layer_index": 23,
+          "page_ids": [
+            120
+          ],
+          "page_count": 1,
+          "window_token_count": 20,
+          "element_count": 10240,
+          "dtype": "bfloat16",
+          "device": "cuda:0"
+        }
+      ]
+    },
+    "retnet_state_bytes": 768,
+    "retnet_state_slot_count": 6,
+    "retnet_layer_state_count": 24,
+    "expected_retnet_layer_state_count": 24,
+    "retnet_enabled_layer_count": 24,
+    "retnet_assist_layers": "all_layers",
+    "retnet_assist_selected_layers": [],
+    "retnet_adapter_rank": 16,
+    "retnet_parameter_sharing": "global",
+    "retnet_state_sharing": "group",
+    "retnet_sharing_group_size": 4,
+    "retnet_context_adapter_enabled": false,
+    "retnet_context_adapter_alpha": 0.0,
+    "retnet_state_pool_metadata": {
+      "num_layers": 24,
+      "state_slot_count": 6,
+      "layer_to_state_slot": [
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        3,
+        3,
+        4,
+        4,
+        4,
+        4,
+        5,
+        5,
+        5,
+        5
+      ],
+      "request_count": 1,
+      "state_count": 6,
+      "requests": {
+        "resource-report": {
+          "request_id": "resource-report",
+          "phase": "decode",
+          "token_count": 20,
+          "state_count": 6,
+          "update_count": 5,
+          "preempt_count": 0,
+          "released": false,
+          "release_reason": null,
+          "created_at": 1778689514.9829104,
+          "updated_at": 1778689515.3507466
+        }
+      }
+    },
+    "retnet_summary_norm_mean": 12.140842005610466,
+    "retnet_q_adapter_delta_norm_mean": 3.503829258183638,
+    "retnet_k_adapter_delta_norm_mean": 0.0,
+    "retnet_context_adapter_delta_norm_mean": 0.0,
+    "retnet_alpha_q_mean": -0.0033721923828125,
+    "retnet_alpha_k_mean": 0.0,
+    "retnet_alpha_context_mean": 0.0,
+    "xlstm_memory_state_bytes": 0,
+    "xlstm_memory_pool_metadata": {
+      "num_layers": 24,
+      "request_count": 1,
+      "state_count": 0,
+      "requests": {
+        "resource-report": {
+          "request_id": "resource-report",
+          "phase": "decode",
+          "token_count": 0,
+          "state_count": 0,
+          "update_count": 5,
+          "preempt_count": 0,
+          "decay_count": 0,
+          "reset_count": 0,
+          "released": false,
+          "release_reason": null,
+          "created_at": 1778689514.9829485,
+          "updated_at": 1778689515.3507605
+        }
+      }
+    },
+    "xlstm_effective_beta_mean": 0.0,
+    "xlstm_memory_norm_mean": 0.0,
+    "xlstm_adapter_delta_norm_mean": 0.0,
+    "router_entropy_mean": 0.7300555275533043,
+    "load_balance_loss_mean": 3.0,
+    "router_z_loss_mean": 20.077140480279922,
+    "logits_shape": [
+      1,
+      16,
+      129280
+    ],
+    "decode_logits_shape": [
+      1,
+      1,
+      129280
+    ]
+  }
+}

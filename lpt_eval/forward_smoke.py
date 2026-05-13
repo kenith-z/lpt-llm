@@ -79,8 +79,11 @@ class ForwardSmokeReport:
             f"| retnet_assist_mode | `{metrics['retnet_assist_mode']}` |",
             f"| retnet_adapter_target | `{metrics['retnet_adapter_target']}` |",
             f"| retnet_k_adapter_enabled | {metrics['retnet_k_adapter_enabled']} |",
+            f"| retnet_context_adapter_enabled | {metrics['retnet_context_adapter_enabled']} |",
             f"| retnet_q_adapter_delta_norm_mean | {metrics['retnet_q_adapter_delta_norm_mean']:.6f} |",
             f"| retnet_k_adapter_delta_norm_mean | {metrics['retnet_k_adapter_delta_norm_mean']:.6f} |",
+            f"| retnet_context_adapter_delta_norm_mean | {metrics['retnet_context_adapter_delta_norm_mean']:.6f} |",
+            f"| retnet_alpha_context_mean | {metrics['retnet_alpha_context_mean']:.8f} |",
             f"| xlstm_state_count | {metrics['xlstm_state_count']} |",
             f"| expected_xlstm_state_count | {metrics['expected_xlstm_state_count']} |",
             f"| paged_kv_page_count | {metrics['paged_kv_page_count']} |",
@@ -113,8 +116,10 @@ def _retnet_observability(layer_states):
     summary_norms = []
     q_delta_norms = []
     k_delta_norms = []
+    context_delta_norms = []
     alpha_q_values = []
     alpha_k_values = []
+    alpha_context_values = []
     for layer_state in layer_states:
         state = layer_state.retnet_assist
         if state is None:
@@ -122,14 +127,18 @@ def _retnet_observability(layer_states):
         summary_norms.append(state.summary_norm)
         q_delta_norms.append(state.q_adapter_delta_norm)
         k_delta_norms.append(state.k_adapter_delta_norm)
+        context_delta_norms.append(state.context_adapter_delta_norm)
         alpha_q_values.append(state.alpha_q)
         alpha_k_values.append(state.alpha_k)
+        alpha_context_values.append(state.alpha_context)
     return {
         "retnet_summary_norm_mean": _mean_optional(summary_norms),
         "retnet_q_adapter_delta_norm_mean": _mean_optional(q_delta_norms),
         "retnet_k_adapter_delta_norm_mean": _mean_optional(k_delta_norms),
+        "retnet_context_adapter_delta_norm_mean": _mean_optional(context_delta_norms),
         "retnet_alpha_q_mean": _mean_optional(alpha_q_values),
         "retnet_alpha_k_mean": _mean_optional(alpha_k_values),
+        "retnet_alpha_context_mean": _mean_optional(alpha_context_values),
     }
 
 
@@ -209,6 +218,8 @@ def run_lpt_v2_forward_smoke_report(
         "retnet_assist_mode": model.config.retnet_assist_mode,
         "retnet_adapter_target": list(model.config.retnet_adapter_target),
         "retnet_k_adapter_enabled": bool(model.config.retnet_k_adapter_enabled),
+        "retnet_context_adapter_enabled": bool(model.config.retnet_context_adapter_enabled),
+        "retnet_context_adapter_alpha": float(model.config.retnet_context_adapter_alpha),
         **retnet_metrics,
         "xlstm_memory_layers": model.config.xlstm_memory_layers,
         "xlstm_memory_selected_layers": list(model.config.xlstm_memory_selected_layers),

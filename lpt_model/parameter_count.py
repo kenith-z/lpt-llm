@@ -161,9 +161,17 @@ def estimate_moe_aware_parameter_counts(
             + int(model_config.retnet_adapter_rank) * kv_hidden_size
             + (1 if model_config.retnet_adapter_alpha_k_trainable else 0)
         )
+    retnet_context_adapter_params_per_group = 0
+    if model_config.retnet_context_adapter_enabled:
+        retnet_context_adapter_params_per_group = (
+            int(model_config.retnet_state_dim) * int(model_config.retnet_adapter_rank)
+            + int(model_config.retnet_adapter_rank) * hidden_size
+            + 1
+        )
     retnet_core_params = retnet_parameter_groups * retnet_core_params_per_group
     retnet_adapter_params = retnet_parameter_groups * retnet_adapter_params_per_group
     retnet_k_adapter_params = retnet_parameter_groups * retnet_k_adapter_params_per_group
+    retnet_context_adapter_params = retnet_parameter_groups * retnet_context_adapter_params_per_group
 
     swiglu_intermediate_size = _swiglu_intermediate_size(hidden_size)
     swiglu_expert_params = 3 * hidden_size * swiglu_intermediate_size
@@ -191,7 +199,12 @@ def estimate_moe_aware_parameter_counts(
         + retnet_core_params
         + xlstm_core_params
     )
-    adapter_params = retnet_adapter_params + retnet_k_adapter_params + xlstm_adapter_params
+    adapter_params = (
+        retnet_adapter_params
+        + retnet_k_adapter_params
+        + retnet_context_adapter_params
+        + xlstm_adapter_params
+    )
     total_physical_params = shared_params + expert_params + router_params + adapter_params
     active_params_per_token = shared_params + active_expert_params + router_params + adapter_params
     state_runtime_bytes = (
@@ -206,6 +219,7 @@ def estimate_moe_aware_parameter_counts(
         "retnet_assist_core": retnet_core_params,
         "retnet_q_adapter": retnet_adapter_params,
         "retnet_k_adapter": retnet_k_adapter_params,
+        "retnet_context_adapter": retnet_context_adapter_params,
         "swiglu_experts": expert_params,
         "moe_router": router_params,
         "xlstm_memory_core": xlstm_core_params,

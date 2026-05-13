@@ -2,8 +2,14 @@
 
 本文只记录 LPT v2 定型方案的历史变动。当前实现与任务拆解以 `help/LPTv2模型定型方案.md` 为准。
 
+## 2026-05-14
+
+- 完成第 27 项 `RetNetContextAdapter` 两分支 1164 step chat SFT 对比，报告路径为 `help/LPTv2扩展实验/27_context_adapter/LPTv2_27_context_adapter_实验报告.md`；`base_continued` 与 `exp_27_context_adapter` 均通过 checkpoint validate、真实 checkpoint forward smoke、4100 长上下文代理和资源评测。ContextAdapter 分支长上下文代理收益明确，但 chat SFT eval loss 退化且吞吐下降，初始自动结论为“暂不进入默认主干或默认组合实验，仅保留为长上下文专项候选”。
+- 第 27 项结论经人工介入后修订：用户判断长上下文效果好是必要条件，且本轮小样本 eval loss 小幅上升不足以否定机制收益，因此将 `RetNetContextAdapter` 从“仅保留为长上下文专项候选”调整为“长上下文主候选，进入组合实验”；若后续 `global/per_layer + every_4_layers/rank16 + RetNetContextAdapter` 组合分支相对无 ContextAdapter 对照不劣化，则直接进入主干。
+
 ## 2026-05-13
 
+- 完成第 27 项 `RetNetContextAdapter` 的代码与工具准备：新增轻量 `RetNetContextAdapter`，复用 `SharedRetNetAssist` 的 `summary_sequence` 在 Attention 输出投影后做低秩残差注入，不新增状态池、不写入 Paged KV；新增 `context_adapter_delta_norm`、`alpha_context` 观测指标、参数统计、checkpoint schema metadata、`tools/init_lpt_v2_exp27_branches.py`、`data/manifests/chat_sft_eval_exp27.json` 和 `help/LPTv2扩展实验/27_context_adapter/LPTv2_27_context_adapter_实验报告.md`；训练仍由人工按报告命令执行。
 - 完成第 26 项 `RetNetAssist 启用层与 rank` 五分支 1164 step chat SFT 对比，报告路径为 `help/LPTv2扩展实验/26_retnet_layers_rank/LPTv2_26_retnet_layers_rank_实验报告.md`；`base_continued(all_layers/rank16)`、`exp_26_retnet_every_2_layers`、`exp_26_retnet_every_4_layers`、`exp_26_retnet_selected_offset_layers`、`exp_26_retnet_rank32` 均通过 checkpoint validate、真实 checkpoint forward smoke、4100 长上下文代理和资源评测。
 - 第 26 项结论调整为：`every_4_layers/rank16` 的 4100 long loss 最低、训练吞吐最高且训练显存峰值最低，作为后续组合实验主候选；`every_2_layers/rank16` 的 eval loss 最低，但长上下文代理退化，保留为质量对照/备选；`rank32` 未带来 eval 收益，不进入默认主干。
 - 保留组合限制：第 26 项为单项归因，仍保持 `global/group` 共享策略；后续组合实验优先验证第 25 项 `global/per_layer` 与第 26 项 `every_4_layers` 的交互效果，并保留 `every_2_layers` 作为质量对照。

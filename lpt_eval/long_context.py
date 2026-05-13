@@ -57,12 +57,18 @@ def _collect_retnet_mechanism(states):
             "token_count": 0,
             "q_adapter_delta_norm": 0.0,
             "k_adapter_delta_norm": 0.0,
+            "context_adapter_delta_norm": 0.0,
+            "alpha_context": 0.0,
         }
     return {
         "first_layer_index": int(retnet_states[0][0]),
         "token_count": max(int(state.token_count) for _, state in retnet_states),
         "q_adapter_delta_norm": _mean_optional(state.q_adapter_delta_norm for _, state in retnet_states),
         "k_adapter_delta_norm": _mean_optional(state.k_adapter_delta_norm for _, state in retnet_states),
+        "context_adapter_delta_norm": _mean_optional(
+            state.context_adapter_delta_norm for _, state in retnet_states
+        ),
+        "alpha_context": _mean_optional(state.alpha_context for _, state in retnet_states),
     }
 
 
@@ -328,6 +334,7 @@ def run_lpt_v2_long_context_admission_for_model(
     retnet_tokens = int(retnet_mechanism["token_count"])
     q_adapter_delta_norm = float(retnet_mechanism["q_adapter_delta_norm"])
     k_adapter_delta_norm = float(retnet_mechanism["k_adapter_delta_norm"])
+    context_adapter_delta_norm = float(retnet_mechanism["context_adapter_delta_norm"])
     paged_window = int(states[0].attention.paged_kv_ref.window_token_count)
     mechanism_ready = bool(retnet_tokens > paged_window)
     status = "admit_checkpoint_path" if mechanism_ready else "close_or_debug"
@@ -375,6 +382,8 @@ def run_lpt_v2_long_context_admission_for_model(
             "paged_kv_window_token_count": paged_window,
             "q_adapter_delta_norm": q_adapter_delta_norm,
             "k_adapter_delta_norm": k_adapter_delta_norm,
+            "context_adapter_delta_norm": context_adapter_delta_norm,
+            "alpha_context": float(retnet_mechanism["alpha_context"]),
             "mechanism_ready": mechanism_ready,
             "retnet_assist_layers": config.retnet_assist_layers,
             "retnet_assist_selected_layers": list(config.retnet_assist_selected_layers),
@@ -387,6 +396,7 @@ def run_lpt_v2_long_context_admission_for_model(
             "retnet_sharing_group_size": int(config.retnet_sharing_group_size),
             "retnet_adapter_target": list(config.retnet_adapter_target),
             "retnet_k_adapter_enabled": bool(config.retnet_k_adapter_enabled),
+            "retnet_context_adapter_enabled": bool(config.retnet_context_adapter_enabled),
         },
         "quality_decision": {
             "status": status,
@@ -500,6 +510,7 @@ def run_lpt_v2_long_context_admission(
     retnet_tokens = int(retnet_mechanism["token_count"])
     q_adapter_delta_norm = float(retnet_mechanism["q_adapter_delta_norm"])
     k_adapter_delta_norm = float(retnet_mechanism["k_adapter_delta_norm"])
+    context_adapter_delta_norm = float(retnet_mechanism["context_adapter_delta_norm"])
     adapter_delta_l2 = 0.0
     alpha_q = 0.0
     first_retnet_layer = retnet_mechanism["first_layer_index"]
@@ -524,7 +535,13 @@ def run_lpt_v2_long_context_admission(
     paged_window = int(assist_states[0].attention.paged_kv_ref.window_token_count)
     mechanism_ready = bool(
         retnet_tokens > paged_window
-        and (logit_delta_l2 > 0.0 or adapter_delta_l2 > 0.0 or q_adapter_delta_norm > 0.0 or k_adapter_delta_norm > 0.0)
+        and (
+            logit_delta_l2 > 0.0
+            or adapter_delta_l2 > 0.0
+            or q_adapter_delta_norm > 0.0
+            or k_adapter_delta_norm > 0.0
+            or context_adapter_delta_norm > 0.0
+        )
     )
 
     relative_ppl_delta = float((assist_result["ppl"] - no_assist_result["ppl"]) / max(no_assist_result["ppl"], 1e-9))
@@ -579,7 +596,9 @@ def run_lpt_v2_long_context_admission(
             "adapter_delta_l2": adapter_delta_l2,
             "q_adapter_delta_norm": q_adapter_delta_norm,
             "k_adapter_delta_norm": k_adapter_delta_norm,
+            "context_adapter_delta_norm": context_adapter_delta_norm,
             "alpha_q": alpha_q,
+            "alpha_context": float(retnet_mechanism["alpha_context"]),
             "retnet_assist_layers": assist_config.retnet_assist_layers,
             "retnet_assist_selected_layers": list(assist_config.retnet_assist_selected_layers),
             "retnet_enabled_layer_count": count_retnet_assist_enabled_layers(assist_config),
@@ -591,6 +610,7 @@ def run_lpt_v2_long_context_admission(
             "retnet_sharing_group_size": int(assist_config.retnet_sharing_group_size),
             "retnet_adapter_target": list(assist_config.retnet_adapter_target),
             "retnet_k_adapter_enabled": bool(assist_config.retnet_k_adapter_enabled),
+            "retnet_context_adapter_enabled": bool(assist_config.retnet_context_adapter_enabled),
             "mechanism_ready": mechanism_ready,
         },
         "quality_decision": {

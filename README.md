@@ -2,7 +2,7 @@
 ![Logo](help/assets/lpt_logo_long.png)
 **灵预 - “灵”代表生成创意，“预”代表预训练。**  
 `lpt-llm` 是一个面向研究与工程验证的原生 LLM 项目。  
-模型名为 **LPT**，英文全称 **Ling Pre-trained Transformer**，中文名 **灵预**。  
+模型名为 **LPT**，英文简称 **LingYure**，英文全称 **Ling Pre-trained Transformer**，中文名 **灵预**。  
 当前主线是 **LPT v2-only**。
 
 ## 文档职责

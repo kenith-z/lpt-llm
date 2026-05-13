@@ -352,9 +352,9 @@ class ModelConfig:
     retnet_adapter_alpha_k_trainable: bool = True
     # 是否启用 K adapter；默认关闭，仅第 24 项实验打开。
     retnet_k_adapter_enabled: bool = False
-    # 是否启用上下文 adapter；当前仅预留评估入口。
+    # 是否启用上下文 adapter；复用 RetNetAssist summary，不新增第二套状态。
     retnet_context_adapter_enabled: bool = False
-    # 上下文 adapter 的初始 scale；未启用时保持 0。
+    # 上下文 adapter 的 FP32 trainable scale 初始值；未启用时保持 0。
     retnet_context_adapter_alpha: float = 0.0
     # RetNetAssist 是否写入 Paged KV；必须为 false。
     retnet_enters_paged_kv: bool = False
@@ -813,6 +813,12 @@ class ModelConfig:
             raise ValueError("retnet_assist_mode=q_adapter 时不能启用 K adapter。")
         if self.retnet_assist_mode == "qk_adapter" and not self.retnet_k_adapter_enabled:
             raise ValueError("retnet_assist_mode=qk_adapter 时必须启用 K adapter。")
+        if self.retnet_context_adapter_alpha < 0:
+            raise ValueError("retnet_context_adapter_alpha 不能为负数。")
+        if self.retnet_context_adapter_enabled and (
+            not self.retnet_assist_enabled or self.retnet_assist_layers == "disabled"
+        ):
+            raise ValueError("retnet_context_adapter_enabled=true 时必须启用 RetNetAssist。")
         if self.retnet_enters_paged_kv or self.retnet_kv_replacement:
             raise ValueError("RetNetAssist 不能进入或替换 Paged KV。")
         if self.attention_logit_bias_from_retnet:

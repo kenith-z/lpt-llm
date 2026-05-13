@@ -10,7 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from lpt_config import DENSE_KV_CACHE_BACKEND, ModelConfig
-from lpt_model import LPTV2, LayerStateV2, QOnlyRetNetAdapter
+from lpt_model import LPTV2, LayerStateV2, QOnlyRetNetAdapter, RetNetContextAdapter
 from lpt_model.model_v2 import SwiGLUMoE
 
 
@@ -276,6 +276,47 @@ class TestLPTV2Model(unittest.TestCase):
             )
         self.assertGreater(states[0].retnet_assist.q_adapter_delta_norm, 0.0)
         self.assertGreater(states[0].retnet_assist.k_adapter_delta_norm, 0.0)
+
+    def test_retnet_context_adapter_reuses_summary_without_extra_state(self):
+        config = build_tiny_v2_config(
+            retnet_context_adapter_enabled=True,
+            retnet_context_adapter_alpha=1e-4,
+        )
+        model = LPTV2(32, config)
+
+        self.assertIsInstance(model.layers[0].attention_mixer.context_adapter, RetNetContextAdapter)
+        self.assertIs(
+            model.layers[0].attention_mixer.context_adapter,
+            model.layers[1].attention_mixer.context_adapter,
+        )
+        context_adapter = model.layers[0].attention_mixer.context_adapter
+        self.assertEqual(context_adapter.alpha_context.dtype, torch.float32)
+
+        model.train()
+        logits, states = model(
+            torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
+            rope_cache_scope="train",
+            request_id="context-train",
+            use_kv_cache=False,
+        )
+        logits.float().sum().backward()
+
+        self.assertIsNotNone(context_adapter.down_projection.weight.grad)
+        self.assertIsNotNone(context_adapter.up_projection.weight.grad)
+        self.assertIsNotNone(context_adapter.alpha_context.grad)
+        self.assertEqual(states[0].retnet_assist.token_count, 4)
+
+        model.eval()
+        with torch.no_grad():
+            _, eval_states = model(
+                torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
+                rope_cache_scope="inference",
+                request_id="context-eval",
+                use_kv_cache=False,
+            )
+
+        self.assertGreater(eval_states[0].retnet_assist.context_adapter_delta_norm, 0.0)
+        self.assertAlmostEqual(eval_states[0].retnet_assist.alpha_context, 1e-4)
 
     def test_swiglu_moe_records_router_statistics(self):
         model = LPTV2(32, build_tiny_v2_config(moe_num_experts=4, moe_top_k=2))

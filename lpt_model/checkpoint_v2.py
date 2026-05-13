@@ -66,6 +66,8 @@ def _state_schema_metadata(config):
             "adapter_rank": int(config.retnet_adapter_rank),
             "adapter_target": list(config.retnet_adapter_target),
             "k_adapter_enabled": bool(config.retnet_k_adapter_enabled),
+            "context_adapter_enabled": bool(config.retnet_context_adapter_enabled),
+            "context_adapter_alpha": float(config.retnet_context_adapter_alpha),
         },
         "moe_state": {
             "state_type": "moe_layer_state",

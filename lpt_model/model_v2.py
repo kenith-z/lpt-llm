@@ -455,10 +455,60 @@ class QOnlyRetNetAdapter(nn.Module):
         return query, key, metrics
 
 
+class RetNetContextAdapter(nn.Module):
+    """RetNetAssist 低秩上下文注入 adapter。
+
+    该模块只复用 SharedRetNetAssist 产生的 summary_sequence，不新增检索状态；
+    注入位置放在 Attention 输出投影之后，由 block 外层残差统一完成
+    ``x = x + attention_output``。
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.hidden_size = int(config.hidden_size)
+        self.down_projection = nn.Linear(config.retnet_state_dim, config.retnet_adapter_rank, bias=False)
+        self.up_projection = nn.Linear(config.retnet_adapter_rank, self.hidden_size, bias=False)
+        self.alpha_context = nn.Parameter(
+            torch.tensor(float(config.retnet_context_adapter_alpha), dtype=torch.float32)
+        )
+
+    def _apply(self, fn):
+        super()._apply(fn)
+        self.alpha_context.data = self.alpha_context.data.float()
+        if self.alpha_context.grad is not None:
+            self.alpha_context.grad.data = self.alpha_context.grad.data.float()
+        return self
+
+    def forward(self, summary_sequence, hidden):
+        delta = self.up_projection(self.down_projection(summary_sequence))
+        alpha = self.alpha_context.to(dtype=hidden.dtype)
+        output = hidden + alpha * delta
+        metrics = {
+            "context_adapter_delta_norm": None,
+            "alpha_context": None,
+        }
+        if not torch.is_grad_enabled():
+            metrics = {
+                "context_adapter_delta_norm": float(delta.float().norm(dim=-1).mean().detach().cpu()),
+                "alpha_context": float(self.alpha_context.detach().cpu()),
+            }
+        return output, metrics
+
+
 class LocalAttentionMixerV2(nn.Module):
     """Local Attention + RetNetAssist Q/QK adapter。"""
 
-    def __init__(self, config, layer_index, retnet_assist, q_adapter, paged_kv_cache, *, retnet_state_slot=None):
+    def __init__(
+        self,
+        config,
+        layer_index,
+        retnet_assist,
+        q_adapter,
+        context_adapter,
+        paged_kv_cache,
+        *,
+        retnet_state_slot=None,
+    ):
         super().__init__()
         self.config = config
         self.layer_index = int(layer_index)
@@ -471,6 +521,7 @@ class LocalAttentionMixerV2(nn.Module):
         self.retnet_assist = retnet_assist
         self.paged_kv_cache = paged_kv_cache
         self.q_adapter = q_adapter
+        self.context_adapter = context_adapter
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
@@ -512,6 +563,7 @@ class LocalAttentionMixerV2(nn.Module):
         k = self.k_proj(x_norm).view(batch_size, query_length, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x_norm).view(batch_size, query_length, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
+        summary_sequence = None
         if self._retnet_enabled_for_layer():
             if self.retnet_assist is None or self.q_adapter is None:
                 raise RuntimeError("启用 RetNetAssist 的层缺少 retnet_assist 或 q_adapter 模块。")
@@ -585,13 +637,19 @@ class LocalAttentionMixerV2(nn.Module):
                 v = v.repeat_interleave(num_kv_groups, dim=1)
             out = F.scaled_dot_product_attention(q, k, v, **sdpa_kwargs)
         out = out.transpose(1, 2).contiguous().view(batch_size, query_length, self.hidden_size)
+        attention_output = self.o_proj(out)
+        if self._retnet_enabled_for_layer() and bool(self.config.retnet_context_adapter_enabled):
+            if self.context_adapter is None or summary_sequence is None:
+                raise RuntimeError("启用 RetNetContextAdapter 的层缺少 context_adapter 或 summary_sequence。")
+            attention_output, context_metrics = self.context_adapter(summary_sequence, attention_output)
+            retnet_state = replace(retnet_state, **context_metrics)
 
         new_state = replace(
             layer_state,
             attention=attention_state,
             retnet_assist=retnet_state,
         )
-        return self.o_proj(out), new_state
+        return attention_output, new_state
 
 
 class SwiGLUMoE(nn.Module):
@@ -849,7 +907,17 @@ class xLSTMMemoryAssist(nn.Module):
 class LPTBlockV2(nn.Module):
     """LPT v2 Decoder block。"""
 
-    def __init__(self, config, layer_index, retnet_assist, q_adapter, paged_kv_cache, *, retnet_state_slot=None):
+    def __init__(
+        self,
+        config,
+        layer_index,
+        retnet_assist,
+        q_adapter,
+        context_adapter,
+        paged_kv_cache,
+        *,
+        retnet_state_slot=None,
+    ):
         super().__init__()
         self.layer_index = int(layer_index)
         self.sequence_norm = RMSNorm(config.hidden_size)
@@ -859,6 +927,7 @@ class LPTBlockV2(nn.Module):
             layer_index,
             retnet_assist,
             q_adapter,
+            context_adapter,
             paged_kv_cache,
             retnet_state_slot=retnet_state_slot,
         )
@@ -945,6 +1014,7 @@ class LPTV2(nn.Module):
             else {}
         )
         q_adapter_by_slot = {}
+        context_adapter_by_slot = {}
 
         def retnet_assist_for(parameter_slot):
             if parameter_slot not in retnet_assist_by_slot:
@@ -956,11 +1026,21 @@ class LPTV2(nn.Module):
                 q_adapter_by_slot[parameter_slot] = QOnlyRetNetAdapter(self.config)
             return q_adapter_by_slot[parameter_slot]
 
+        def context_adapter_for(parameter_slot):
+            if parameter_slot not in context_adapter_by_slot:
+                context_adapter_by_slot[parameter_slot] = RetNetContextAdapter(self.config)
+            return context_adapter_by_slot[parameter_slot]
+
         def retnet_modules_for(layer_index):
             slot = _retnet_parameter_slot_for_layer(self.config, layer_index)
             if slot is None:
-                return None, None
-            return retnet_assist_for(int(slot)), q_adapter_for(int(slot))
+                return None, None, None
+            context_adapter = (
+                context_adapter_for(int(slot))
+                if bool(self.config.retnet_context_adapter_enabled)
+                else None
+            )
+            return retnet_assist_for(int(slot)), q_adapter_for(int(slot)), context_adapter
 
         self.layers = nn.ModuleList([
             LPTBlockV2(

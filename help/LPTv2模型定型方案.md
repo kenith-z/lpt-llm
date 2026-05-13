@@ -560,9 +560,10 @@ help/LPTv2扩展实验/27_context_adapter/LPTv2_27_context_adapter_实验报告.
   - 成功标准：基于训练后的 `artifacts/lpt_v2/text_pretrain` 建立 `exp_26_retnet_layers_rank` 单项分支继续训练；一次只改启用层或 rank 一个维度，找到质量收益与计算成本的最小可用配置；必须产出对应实验报告。
   - 当前结果：已完成 `base_continued(all_layers/rank16)`、`exp_26_retnet_every_2_layers`、`exp_26_retnet_every_4_layers`、`exp_26_retnet_selected_offset_layers`、`exp_26_retnet_rank32` 五分支 1164 step chat SFT 对比，并完成 checkpoint validate、forward smoke、4100 长上下文代理和资源评测。`every_4_layers/rank16` 的 4100 long loss 最低、训练吞吐最高且训练显存峰值最低，调整为后续组合实验主候选；`every_2_layers/rank16` 的 eval loss 最低，但长上下文代理退化，保留为质量对照/备选；`rank32` 未带来 eval 收益，不进入默认主干。本项仍保持 `global/group` 共享策略，最终主干需与第 25 项 `global/per_layer` 组合后再确认。
 
-- [ ] 27. 评估 RetNetContextAdapter
+- [x] 27. 评估 RetNetContextAdapter
   - 范围：`x = x + alpha_context * Adapter_Context(z_t)` 或 FFN 输入调制，不新增第二套检索状态。
   - 成功标准：基于训练后的 `artifacts/lpt_v2/text_pretrain` 建立 `exp_27_context_adapter` 单项分支继续训练；若 Q-only 无法处理窗口外压缩内容，验证轻量上下文注入是否提升长上下文任务，且不破坏局部精确任务；必须产出对应实验报告。
+  - 当前结果：已完成 `base_continued` 与 `exp_27_context_adapter` 两分支 1164 step chat SFT 对比，并完成 checkpoint validate、forward smoke、4100 长上下文代理和资源评测。ContextAdapter 分支 long loss、needle rank 和 needle logprob 均明显优于 baseline，且不增加 RetNet runtime state；虽然 chat SFT eval loss 小幅退化、训练与资源评测吞吐下降，但经人工复核后将其设为长上下文主候选进入组合实验。后续若 `global/per_layer + every_4_layers/rank16 + RetNetContextAdapter` 组合分支相对无 ContextAdapter 对照不劣化，则直接进入主干；若通用 eval 或资源成本明显退化，则降级为长上下文专项开关。
 
 - [ ] 28. 评估 CLA 共享
   - 范围：`cla_share_every_n_layers=2` 对照评估。

@@ -16,6 +16,7 @@ from .model_v2 import (
     LocalAttentionMixerV2,
     PagedKVCache,
     QOnlyRetNetAdapter,
+    RetNetContextAdapter,
     SharedRetNetAssist,
     SwiGLUMoE,
 )

@@ -155,8 +155,10 @@ class RetNetAssistState:
     summary_norm: float | None = None
     q_adapter_delta_norm: float | None = None
     k_adapter_delta_norm: float | None = None
+    context_adapter_delta_norm: float | None = None
     alpha_q: float | None = None
     alpha_k: float | None = None
+    alpha_context: float | None = None
     release_metadata: StateReleaseMetadata | None = None
     state_type: str = RETNET_ASSIST_STATE_TYPE
 
@@ -174,8 +176,10 @@ class RetNetAssistState:
             "summary_norm",
             "q_adapter_delta_norm",
             "k_adapter_delta_norm",
+            "context_adapter_delta_norm",
             "alpha_q",
             "alpha_k",
+            "alpha_context",
         ):
             value = getattr(self, field_name)
             if value is not None:
@@ -201,8 +205,10 @@ class RetNetAssistState:
             "summary_norm": self.summary_norm,
             "q_adapter_delta_norm": self.q_adapter_delta_norm,
             "k_adapter_delta_norm": self.k_adapter_delta_norm,
+            "context_adapter_delta_norm": self.context_adapter_delta_norm,
             "alpha_q": self.alpha_q,
             "alpha_k": self.alpha_k,
+            "alpha_context": self.alpha_context,
             "release_metadata": self.release_metadata.to_dict(),
         }
 

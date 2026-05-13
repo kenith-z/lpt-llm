@@ -105,6 +105,21 @@ class TestMoEAwareParameterCount(unittest.TestCase):
         self.assertGreater(qk_report.module_breakdown["retnet_k_adapter"], 0)
         self.assertGreater(qk_report.adapter_params, q_report.adapter_params)
 
+    def test_retnet_context_adapter_adds_adapter_params_without_state_bytes(self):
+        base_config = ModelConfig.from_preset(LPT_V2_DEV_TINY_PRESET)
+        context_config = base_config.with_overrides(
+            retnet_context_adapter_enabled=True,
+            retnet_context_adapter_alpha=1e-4,
+        )
+
+        base_report = estimate_moe_aware_parameter_counts(base_config)
+        context_report = estimate_moe_aware_parameter_counts(context_config)
+
+        self.assertEqual(base_report.module_breakdown["retnet_context_adapter"], 0)
+        self.assertGreater(context_report.module_breakdown["retnet_context_adapter"], 0)
+        self.assertGreater(context_report.adapter_params, base_report.adapter_params)
+        self.assertEqual(context_report.state_runtime_bytes, base_report.state_runtime_bytes)
+
     def test_retnet_sharing_strategy_changes_parameter_and_state_counts(self):
         base_config = ModelConfig.from_preset(
             LPT_V2_DEV_TINY_PRESET,

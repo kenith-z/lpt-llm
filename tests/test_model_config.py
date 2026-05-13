@@ -242,6 +242,30 @@ class TestModelConfig(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     ModelConfig.from_preset(LPT_V2_DEV_TINY_PRESET, **payload)
 
+    def test_retnet_context_adapter_requires_retnet_assist(self):
+        config = ModelConfig.from_preset(
+            LPT_V2_DEV_TINY_PRESET,
+            retnet_context_adapter_enabled=True,
+            retnet_context_adapter_alpha=1e-4,
+        )
+
+        self.assertTrue(config.retnet_context_adapter_enabled)
+        self.assertEqual(config.retnet_context_adapter_alpha, 1e-4)
+
+        invalid_payloads = (
+            {"retnet_context_adapter_alpha": -1e-4},
+            {
+                "retnet_assist_enabled": False,
+                "retnet_assist_layers": "disabled",
+                "retnet_context_adapter_enabled": True,
+                "retnet_context_adapter_alpha": 1e-4,
+            },
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    ModelConfig.from_preset(LPT_V2_DEV_TINY_PRESET, **payload)
+
     def test_retnet_sharing_config_accepts_per_layer_and_rejects_bad_group_size(self):
         config = ModelConfig.from_preset(
             LPT_V2_DEV_TINY_PRESET,

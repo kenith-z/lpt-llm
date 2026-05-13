@@ -82,6 +82,8 @@ class ResourceReport:
             f"| retnet_summary_norm_mean | {metrics['retnet_summary_norm_mean']:.6f} |",
             f"| retnet_q_adapter_delta_norm_mean | {metrics['retnet_q_adapter_delta_norm_mean']:.6f} |",
             f"| retnet_k_adapter_delta_norm_mean | {metrics['retnet_k_adapter_delta_norm_mean']:.6f} |",
+            f"| retnet_context_adapter_delta_norm_mean | {metrics['retnet_context_adapter_delta_norm_mean']:.6f} |",
+            f"| retnet_alpha_context_mean | {metrics['retnet_alpha_context_mean']:.8f} |",
             f"| xlstm_memory_state_bytes | {metrics['xlstm_memory_state_bytes']} |",
             f"| xlstm_effective_beta_mean | {metrics['xlstm_effective_beta_mean']:.8f} |",
             f"| xlstm_memory_norm_mean | {metrics['xlstm_memory_norm_mean']:.6f} |",
@@ -160,8 +162,10 @@ def _retnet_observability(states):
     summary_norms = []
     q_delta_norms = []
     k_delta_norms = []
+    context_delta_norms = []
     alpha_q_values = []
     alpha_k_values = []
+    alpha_context_values = []
     for state in states:
         if state.retnet_assist is None:
             continue
@@ -169,13 +173,23 @@ def _retnet_observability(states):
             (state.retnet_assist.summary_norm, summary_norms),
             (state.retnet_assist.q_adapter_delta_norm, q_delta_norms),
             (state.retnet_assist.k_adapter_delta_norm, k_delta_norms),
+            (state.retnet_assist.context_adapter_delta_norm, context_delta_norms),
             (state.retnet_assist.alpha_q, alpha_q_values),
             (state.retnet_assist.alpha_k, alpha_k_values),
+            (state.retnet_assist.alpha_context, alpha_context_values),
         ):
             if source is not None:
                 target.append(float(source))
     mean = lambda values: 0.0 if not values else sum(values) / len(values)
-    return mean(summary_norms), mean(q_delta_norms), mean(k_delta_norms), mean(alpha_q_values), mean(alpha_k_values)
+    return (
+        mean(summary_norms),
+        mean(q_delta_norms),
+        mean(k_delta_norms),
+        mean(context_delta_norms),
+        mean(alpha_q_values),
+        mean(alpha_k_values),
+        mean(alpha_context_values),
+    )
 
 
 def run_lpt_v2_resource_report(
@@ -288,8 +302,10 @@ def run_lpt_v2_resource_report(
         retnet_summary_norm,
         retnet_q_adapter_delta_norm,
         retnet_k_adapter_delta_norm,
+        retnet_context_adapter_delta_norm,
         retnet_alpha_q,
         retnet_alpha_k,
+        retnet_alpha_context,
     ) = _retnet_observability(decode_states)
     router_entropy, load_balance_loss, router_z_loss = _router_metrics(decode_states)
     xlstm_effective_beta, xlstm_memory_norm, xlstm_adapter_delta_norm = _xlstm_observability(decode_states)
@@ -327,12 +343,16 @@ def run_lpt_v2_resource_report(
         "retnet_parameter_sharing": config.retnet_parameter_sharing,
         "retnet_state_sharing": config.retnet_state_sharing,
         "retnet_sharing_group_size": int(config.retnet_sharing_group_size),
+        "retnet_context_adapter_enabled": bool(config.retnet_context_adapter_enabled),
+        "retnet_context_adapter_alpha": float(config.retnet_context_adapter_alpha),
         "retnet_state_pool_metadata": model.retnet_state_pool.to_runtime_metadata(),
         "retnet_summary_norm_mean": float(retnet_summary_norm),
         "retnet_q_adapter_delta_norm_mean": float(retnet_q_adapter_delta_norm),
         "retnet_k_adapter_delta_norm_mean": float(retnet_k_adapter_delta_norm),
+        "retnet_context_adapter_delta_norm_mean": float(retnet_context_adapter_delta_norm),
         "retnet_alpha_q_mean": float(retnet_alpha_q),
         "retnet_alpha_k_mean": float(retnet_alpha_k),
+        "retnet_alpha_context_mean": float(retnet_alpha_context),
         "xlstm_memory_state_bytes": xlstm_bytes,
         "xlstm_memory_pool_metadata": model.xlstm_memory_state_pool.to_runtime_metadata(),
         "xlstm_effective_beta_mean": float(xlstm_effective_beta),
