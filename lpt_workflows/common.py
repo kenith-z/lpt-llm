@@ -88,6 +88,7 @@ def build_tokenizer_metadata(tokenizer, tokenizer_path=TOKENIZER_PATH):
         key: str(value)
         for key, value in (getattr(tokenizer, "special_tokens_map", {}) or {}).items()
     }
+    # tokenizer 元数据会写入 trainer_state/checkpoint，后续评测用它判断产物是否可追溯。
     return {
         "tokenizer_path": None if resolved_path is None else str(resolved_path),
         "tokenizer_name_or_path": str(getattr(tokenizer, "name_or_path", "")),
@@ -175,6 +176,7 @@ def resolve_torch_dtype(raw_dtype="auto", *, device=None):
 def apply_longrope2_runtime_overrides(options):
     """应用运行时 LongRoPE2 长度覆盖。"""
     if options.train_max_sequence_length is not None:
+        # train_max_sequence_length 同时影响数据截断和默认训练 RoPE cache 上限。
         GlobalConfig.train_max_sequence_length = int(options.train_max_sequence_length)
         if options.train_rope_cache_max_sequence_length is None:
             GlobalConfig.train_rope_cache_max_sequence_length = int(options.train_max_sequence_length)
@@ -194,6 +196,7 @@ def apply_longrope2_model_config_overrides(config, options):
     if options.long_factors_path is not None:
         overrides["longrope2_long_factors"] = load_longrope2_factors_file(options.long_factors_path)
     elif options.target_window is not None and options.target_window > config.original_max_len:
+        # 未显式提供 factors 时，用 deterministic uniform factors bootstrap，避免隐式空配置。
         overrides["longrope2_long_factors"] = build_longrope2_uniform_factors(
             config,
             int(options.target_window),
@@ -211,6 +214,7 @@ def apply_longrope2_model_config_overrides(config, options):
 def build_workflow_model_config(args, *, checkpoint_path=None):
     """根据 profile/preset/LongRoPE2 CLI 构建 v2 ModelConfig。"""
     if checkpoint_path is not None and Path(checkpoint_path).exists():
+        # 恢复训练/推理时以 checkpoint 内完整 ModelConfig 为准，CLI preset 不再二次覆盖结构。
         loaded = load_lpt_v2_checkpoint(checkpoint_path, map_location="cpu", strict=False)
         return loaded.model.config
     config = build_lpt_v2_profile_config(args.profile, preset=args.preset)
@@ -264,6 +268,7 @@ def find_existing_model_checkpoint(*candidates):
         else:
             path = resolve_checkpoint_file(candidate_path)
         if path is not None and path.exists() and is_torch_save_file_readable(path):
+            # 只返回可被 torch zip 目录轻量读取的文件，减少半写入产物被误用的概率。
             return path
     return None
 
@@ -376,6 +381,7 @@ def add_longrope2_training_arguments(parser: ArgumentParser, recipe=None):
 
 
 def _parse_int_tuple(raw_value):
+    """解析逗号分隔整数列表。"""
     values = tuple(int(value.strip()) for value in str(raw_value).split(",") if value.strip())
     if not values:
         raise ValueError("至少需要提供一个整数。")
@@ -383,6 +389,7 @@ def _parse_int_tuple(raw_value):
 
 
 def _parse_float_tuple(raw_value):
+    """解析逗号分隔浮点列表。"""
     values = tuple(float(value.strip()) for value in str(raw_value).split(",") if value.strip())
     if not values:
         raise ValueError("至少需要提供一个数值。")
@@ -465,6 +472,7 @@ def merge_training_args_with_recipe(args, recipe):
             }
         )
     if args is not None:
+        # 单元测试常传 SimpleNamespace；CLI 则传 argparse.Namespace。两者都用显式字段覆盖 recipe。
         source = {
             key: getattr(args, key)
             for key in defaults

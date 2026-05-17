@@ -24,13 +24,14 @@ class GenerationResult:
 
 
 def build_default_generation_config(**overrides):
-    """构造默认生成配置。"""
+    """构造默认生成配置，并允许用显式覆盖项做 smoke test。"""
     payload = GenerationConfig().__dict__
     payload.update(overrides)
     return GenerationConfig(**payload)
 
 
 def _normalize_conversation(conversation):
+    """把单轮字符串或多轮 messages 统一成 messages 列表。"""
     if isinstance(conversation, str):
         return [{"role": "user", "content": conversation}]
     if isinstance(conversation, list):
@@ -39,6 +40,7 @@ def _normalize_conversation(conversation):
 
 
 def _apply_repetition_penalty(logits, generated_ids, generation_config):
+    """对最近生成 token 应用 repetition penalty。"""
     penalty = float(generation_config.repetition_penalty or 1.0)
     window_size = generation_config.repetition_window_size
     if penalty == 1.0 or not generated_ids:
@@ -51,6 +53,7 @@ def _apply_repetition_penalty(logits, generated_ids, generation_config):
 
 
 def _filter_top_k_top_p(logits, generation_config):
+    """按 top-k / top-p 过滤采样分布。"""
     filtered = logits
     top_k = int(generation_config.top_k or 0)
     if top_k > 0 and top_k < filtered.numel():
@@ -71,6 +74,7 @@ def _filter_top_k_top_p(logits, generation_config):
 
 
 def _select_next_token(logits, generated_ids, generation_config):
+    """根据采样配置选择下一个 token。"""
     next_logits = logits[-1].float().clone()
     next_logits = _apply_repetition_penalty(next_logits, generated_ids, generation_config)
     if not generation_config.do_sample:
@@ -84,6 +88,7 @@ def _select_next_token(logits, generated_ids, generation_config):
 
 
 def _autocast_enabled(device):
+    """判断当前设备是否可启用 autocast。"""
     return device.type == "cuda" and GlobalConfig.autocast_dtype in {
         torch.float16,
         torch.bfloat16,
@@ -131,6 +136,7 @@ def generate_responses_with_token_counts(
         generated_ids = []
         max_new_tokens = int(resolved_generation_config.max_length)
         for _step in range(max_new_tokens):
+            # decode 逐 token 续接，允许 InferenceSession 自己维护 request-bound 状态。
             next_id = _select_next_token(logits[0], generated_ids, resolved_generation_config)
             if next_id == eos_token_id or next_id == pad_token_id:
                 break

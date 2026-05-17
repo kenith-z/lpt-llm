@@ -32,6 +32,7 @@ class MoEAwareParameterReport:
     parameter_count_policy: str = PARAMETER_COUNT_POLICY_MOE_AWARE
 
     def to_dict(self):
+        """导出可写入 JSON/Markdown 报告的参数统计。"""
         return {
             "parameter_count_policy": self.parameter_count_policy,
             "model_size_preset": self.model_size_preset,
@@ -48,11 +49,13 @@ class MoEAwareParameterReport:
 
 
 def _swiglu_intermediate_size(hidden_size):
+    """复用模型侧 SwiGLU intermediate_size 对齐规则。"""
     intermediate_size = int(8 * int(hidden_size) / 3)
     return ((intermediate_size + 255) // 256) * 256
 
 
 def _resolve_layer_interval(layer_policy, default_interval=None):
+    """解析 all/every_N 层策略中的启用间隔。"""
     policy = str(layer_policy)
     if policy == "all_layers":
         return 1
@@ -66,6 +69,7 @@ def _resolve_layer_interval(layer_policy, default_interval=None):
 
 
 def _count_enabled_layers(num_layers, layer_policy, *, default_interval=None):
+    """按间隔策略估算启用层数；selected_layers 由专门逻辑处理。"""
     policy = str(layer_policy)
     if policy in {"disabled", "selected_layers"}:
         return 0
@@ -78,6 +82,7 @@ def _count_enabled_layers(num_layers, layer_policy, *, default_interval=None):
 
 
 def _enabled_retnet_layer_indices(config):
+    """返回实际启用 RetNetAssist 的层号。"""
     return tuple(
         layer_index
         for layer_index in range(int(config.num_layers))
@@ -86,6 +91,7 @@ def _enabled_retnet_layer_indices(config):
 
 
 def _retnet_group_ids(config, layer_indices):
+    """把启用层号映射成 RetNet group id 集合。"""
     group_size = int(config.retnet_sharing_group_size)
     if group_size <= 0:
         raise ValueError("retnet_sharing_group_size 必须为正整数。")
@@ -93,6 +99,7 @@ def _retnet_group_ids(config, layer_indices):
 
 
 def _count_retnet_parameter_groups(config):
+    """同时统计 RetNet 参数组数量和状态槽数量。"""
     enabled_layers = _enabled_retnet_layer_indices(config)
     enabled_layer_count = len(enabled_layers)
     if enabled_layer_count == 0:
@@ -111,6 +118,7 @@ def _count_retnet_parameter_groups(config):
 
 
 def _count_xlstm_enabled_layers(config):
+    """返回实际启用 xLSTMMemory 的层数。"""
     return count_xlstm_memory_enabled_layers(config)
 
 
@@ -145,6 +153,7 @@ def estimate_moe_aware_parameter_counts(
     dense_norm_params = (2 * num_layers + 1) * hidden_size
 
     retnet_parameter_groups, retnet_state_slots = _count_retnet_parameter_groups(model_config)
+    # RetNet 的参数共享和状态共享可能不同：参数组决定物理参数，state_slots 决定运行态字节。
     retnet_core_params_per_group = (
         hidden_size * int(model_config.retnet_state_dim)
         + int(model_config.retnet_state_dim) * int(model_config.retnet_state_dim)
@@ -177,6 +186,7 @@ def estimate_moe_aware_parameter_counts(
     swiglu_expert_params = 3 * hidden_size * swiglu_intermediate_size
     expert_params = num_layers * int(model_config.moe_num_experts) * swiglu_expert_params
     active_expert_params = num_layers * int(model_config.moe_top_k) * swiglu_expert_params
+    # experts 物理参数按全量计入，active 参数只计入每 token top_k 命中的专家。
     router_params = num_layers * hidden_size * int(model_config.moe_num_experts)
 
     xlstm_enabled_layers = _count_xlstm_enabled_layers(model_config)

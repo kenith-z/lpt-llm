@@ -33,6 +33,7 @@ class EncodedTrainingSample:
 
     @property
     def length(self):
+        """返回编码后 token 长度，packing 时以它作为容量单位。"""
         return len(self.input_ids)
 
 
@@ -47,6 +48,7 @@ class PackedTrainingSequence:
 
     @property
     def length(self):
+        """返回 packed row 的真实 token 长度，不含 padding。"""
         return len(self.input_ids)
 
 
@@ -84,6 +86,7 @@ def prepare_tokenizer(tokenizer):
 
 
 def _tokenize_rendered_segments(segments, tokenizer):
+    """把模板渲染片段编码成 input_ids，并按 supervise 标志构造 labels。"""
     input_ids = []
     labels = []
     for segment in segments:
@@ -91,12 +94,14 @@ def _tokenize_rendered_segments(segments, tokenizer):
         segment_ids = encoded["input_ids"]
         if not segment_ids:
             continue
+        # 用户提示、系统提示等非监督片段写入 -100，让 cross entropy 忽略这些位置。
         input_ids.extend(segment_ids)
         labels.extend(segment_ids if segment.supervise else [-100] * len(segment_ids))
     return input_ids, labels
 
 
 def _truncate_sequence(input_ids, labels, max_length):
+    """按最大长度同步截断 input_ids 与 labels。"""
     if max_length is None or len(input_ids) <= max_length:
         return input_ids, labels
     return input_ids[:max_length], labels[:max_length]
@@ -122,6 +127,7 @@ def encode_training_sample(sample, tokenizer, max_length=None):
 
 
 def _pad_batch(batch_input_ids, batch_labels, pad_token_id, pad_to_multiple_of=None):
+    """把普通样本 batch padding 成 input_ids/labels/attention_mask。"""
     max_sequence_length = max(len(sequence) for sequence in batch_input_ids)
     if pad_to_multiple_of:
         remainder = max_sequence_length % pad_to_multiple_of
@@ -142,12 +148,14 @@ def _pad_batch(batch_input_ids, batch_labels, pad_token_id, pad_to_multiple_of=N
 
 
 def _build_packed_sequence(encoded_samples):
+    """把多个样本串接成一条 packed row，并保留样本内位置和分段编号。"""
     packed_input_ids = []
     packed_labels = []
     packed_position_ids = []
     packed_segment_ids = []
 
     for segment_index, encoded_sample in enumerate(encoded_samples, start=1):
+        # position_ids 对每个原始样本从 0 重启，配合 mixed LongRoPE2 保持样本内位置语义。
         packed_input_ids.extend(encoded_sample.input_ids)
         packed_labels.extend(encoded_sample.labels)
         packed_position_ids.extend(range(encoded_sample.length))
@@ -162,6 +170,7 @@ def _build_packed_sequence(encoded_samples):
 
 
 def _pack_encoded_samples(encoded_samples, max_length):
+    """使用简单 first-fit 顺序装箱，把样本打包到不超过 max_length 的 packed row。"""
     if max_length is None or int(max_length) <= 0:
         raise ValueError("sequence packing 要求 max_length 为正整数。")
 
@@ -188,6 +197,7 @@ def _pack_encoded_samples(encoded_samples, max_length):
 
 
 def _pad_packed_batch(packed_sequences, pad_token_id, pad_to_multiple_of=None):
+    """padding packed row，同时输出 position_ids 和 segment_ids。"""
     max_sequence_length = max(sequence.length for sequence in packed_sequences)
     if pad_to_multiple_of:
         remainder = max_sequence_length % pad_to_multiple_of
@@ -242,4 +252,6 @@ def build_packed_training_batch(samples, tokenizer, max_length):
         pad_token_id=tokenizer.pad_token_id,
         pad_to_multiple_of=pad_to_multiple_of,
     )
+    # 返回 len(encoded_samples) 而不是 len(packed_sequences)，训练日志中 sample_count
+    # 仍表示原始样本数，便于和非 packing 路径横向对比。
     return input_ids, labels, attention_mask, position_ids, segment_ids, len(encoded_samples)

@@ -34,14 +34,17 @@ TEXT_PRETRAIN_ARTIFACT_DIR = TEXT_PRETRAIN_RECIPE.artifact_dir
 
 
 def resolve_text_pretrain_checkpoint_root():
+    """返回 text_pretrain latest checkpoint 根目录。"""
     return TEXT_PRETRAIN_ARTIFACT_DIR / "checkpoints" / "latest"
 
 
 def resolve_text_pretrain_inference_weight_path():
+    """返回 text_pretrain 推理权重导出路径。"""
     return TEXT_PRETRAIN_ARTIFACT_DIR / "weights" / "model_weights.pth"
 
 
 def resolve_text_pretrain_resume_checkpoint():
+    """查找 text_pretrain 可续训 checkpoint。"""
     checkpoint_root = resolve_text_pretrain_checkpoint_root()
     return resolve_latest_training_checkpoint(checkpoint_root, lora_mode=False)
 
@@ -89,8 +92,10 @@ def train_text_pretrained_model(
     resume_checkpoint = None if args.no_resume else resolve_text_pretrain_resume_checkpoint()
     checkpoint_file = None if resume_checkpoint is None else resume_checkpoint / "model.pt"
     if checkpoint_file is not None and checkpoint_file.exists():
+        # 续训优先恢复 latest/step checkpoint 内的完整 ModelConfig 和权重。
         model = load_checkpoint_model(checkpoint_file, device=args.device, dtype=args.dtype, strict=True)
     else:
+        # 首次 text_pretrain 从 profile/preset/LongRoPE2 覆盖项构造 v2-only 模型。
         config = build_workflow_model_config(args)
         model = instantiate_model(len(tokenizer), config, device=args.device, dtype=args.dtype)
     display_model_parameter_summary(model)
@@ -144,6 +149,7 @@ def train_text_pretrained_model(
 
 
 def build_parser():
+    """构造 text_pretrain CLI parser。"""
     parser = ArgumentParser(description="运行 LPT v2 text pretrain 阶段。")
     parser.add_argument("--manifest", type=Path, default=TEXT_PRETRAIN_MANIFEST_PATH, help="text pretrain manifest。")
     parser.add_argument("--eval-manifest", type=Path, default=None, help="验证 manifest。")
@@ -153,6 +159,7 @@ def build_parser():
 
 
 def main(argv=None):
+    """text_pretrain 命令行入口。"""
     args = build_parser().parse_args(argv)
     train_text_pretrained_model(args.manifest, eval_manifest_path=args.eval_manifest, args=args)
     return 0

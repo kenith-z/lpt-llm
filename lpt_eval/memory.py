@@ -29,6 +29,7 @@ class MemoryAssistReport:
     metrics: dict
 
     def to_dict(self):
+        """生成 xLSTMAssist 专项评测 JSON 载荷。"""
         return {
             "report_type": "lpt_v2_xlstm_memory",
             "preset": self.preset,
@@ -40,6 +41,7 @@ class MemoryAssistReport:
         }
 
     def to_markdown(self):
+        """生成 xLSTMAssist 专项评测 Markdown 报告。"""
         metrics = self.metrics
         lines = [
             "# LPT v2 xLSTMAssist Report",
@@ -71,6 +73,7 @@ class MemoryAssistReport:
 
 
 def _first_xlstm_state(states):
+    """返回第一层可观测到的 xLSTM 状态。"""
     for state in states:
         if state.xlstm_memory is not None:
             return state.xlstm_memory
@@ -116,6 +119,8 @@ def run_lpt_v2_memory_assist_report(
     eval_switch_config = memory_config.with_overrides(moe_router_input_mode="ffn_norm_only_eval")
     eval_switch_model = LPTV2(vocabulary_size, eval_switch_config).to(device=target_device, dtype=target_dtype).eval()
     eval_switch_model.load_state_dict(memory_model.state_dict(), strict=True)
+    # eval_switch_model 只关闭 Router/experts 对 memory adapter 输出的读取，状态更新仍继续，
+    # 因此两者 logit 差异可用于观察 adapter 是否真正影响 FFN 输入。
 
     input_ids = build_deterministic_input(
         vocabulary_size,
@@ -140,6 +145,7 @@ def run_lpt_v2_memory_assist_report(
             memory_boundary_metadata={"boundary_type": "document"},
             request_id="memory-report",
         )
+        # 后续两步分别覆盖 special token reset 与 session_event reset，验证三类触发源。
         _special_logits, special_states = memory_model.decode(
             torch.tensor([[vocabulary_size - 1]], dtype=torch.long, device=target_device),
             attention_mask=torch.ones(1, sequence_length + 3, dtype=torch.long, device=target_device),

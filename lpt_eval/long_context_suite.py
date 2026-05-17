@@ -21,6 +21,7 @@ DEFAULT_NEEDLE_DEPTHS = (0.2, 0.5, 0.8)
 
 
 def _normalize_int_tuple(values, *, default):
+    """规范化 seq_len/window 这类正整数列表。"""
     if values is None:
         return tuple(int(value) for value in default)
     normalized = tuple(int(value) for value in values)
@@ -32,6 +33,7 @@ def _normalize_int_tuple(values, *, default):
 
 
 def _normalize_float_tuple(values, *, default):
+    """规范化 needle depth 列表，范围固定在 [0, 1]。"""
     if values is None:
         return tuple(float(value) for value in default)
     normalized = tuple(float(value) for value in values)
@@ -43,6 +45,7 @@ def _normalize_float_tuple(values, *, default):
 
 
 def _mean(values):
+    """跳过 None 后求均值。"""
     values = [float(value) for value in values if value is not None]
     if not values:
         return None
@@ -50,6 +53,7 @@ def _mean(values):
 
 
 def _summarize_cases(case_results):
+    """聚合多 case 的状态分布和平均代理指标。"""
     statuses = Counter(
         result["metrics"]["quality_decision"]["status"]
         for result in case_results
@@ -84,6 +88,7 @@ def _summarize_cases(case_results):
 
 
 def _format_float(value, digits=4):
+    """Markdown 中的可选浮点格式化。"""
     return "n/a" if value is None else f"{float(value):.{digits}f}"
 
 
@@ -104,6 +109,7 @@ class LongContextSuiteReport:
     checkpoint_metadata: dict | None = None
 
     def to_dict(self):
+        """生成 suite JSON 载荷。"""
         payload = {
             "report_type": "lpt_v2_long_context_suite",
             "preset": self.preset,
@@ -122,6 +128,7 @@ class LongContextSuiteReport:
         return payload
 
     def to_markdown(self):
+        """生成 suite Markdown 报告。"""
         checkpoint_lines = []
         if self.checkpoint_path is not None:
             checkpoint_lines = [
@@ -206,6 +213,7 @@ def run_lpt_v2_long_context_suite(
         checkpoint_path_text = str(checkpoint_path)
         preset = loaded.checkpoint["model_config"].get("model_size_preset", "checkpoint")
         vocabulary_size = int(loaded.model.token_embedding.num_embeddings)
+        # checkpoint 模式复用同一个模型对象，单个 case 内部会释放 request-bound 状态。
         for window in attention_window_sizes:
             for seq_len in sequence_lengths:
                 if int(seq_len) <= int(window):
@@ -229,6 +237,7 @@ def run_lpt_v2_long_context_suite(
                 if int(seq_len) <= int(window):
                     continue
                 for depth in needle_depths:
+                    # 随机初始化模式每个 case 独立构造模型，避免不同窗口配置互相污染。
                     report = run_lpt_v2_long_context_admission(
                         preset=preset,
                         vocabulary_size=vocabulary_size,

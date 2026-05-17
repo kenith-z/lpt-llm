@@ -11,6 +11,7 @@ from lpt_model import estimate_moe_aware_parameter_counts, load_lpt_v2_checkpoin
 
 
 def _format_int(value):
+    """把整数按千分位格式展示。"""
     return f"{int(value):,}"
 
 
@@ -27,6 +28,7 @@ PARAMETER_SUMMARY_LABELS = {
 
 
 def _format_summary_line(key, value, *, integer=False):
+    """按固定中文标签渲染参数摘要行。"""
     rendered_value = _format_int(value) if integer else value
     return f"{PARAMETER_SUMMARY_LABELS[key]}={rendered_value}"
 

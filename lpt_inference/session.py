@@ -17,6 +17,7 @@ class InferenceSession:
     layer_states: tuple | None = None
 
     def _release_model_state(self):
+        """释放模型内与本 request_id 绑定的 Paged KV、RetNet 和 xLSTM 状态。"""
         if hasattr(self.model, "reset_request_state"):
             self.model.reset_request_state(self.request_id)
         if hasattr(self.model, "release_retnet_assist_state"):
@@ -32,9 +33,11 @@ class InferenceSession:
 
     @property
     def device(self):
+        """返回模型当前主设备。"""
         return next(self.model.parameters()).device
 
     def _full_attention_mask(self):
+        """生成覆盖当前会话全部 token 的 attention mask。"""
         return torch.ones(1, len(self.token_ids), dtype=torch.long, device=self.device)
 
     def prefill(self, input_ids):
@@ -60,6 +63,8 @@ class InferenceSession:
         """追加一个 token 并执行 decode。"""
         self.token_ids.append(int(token_id))
         next_input = torch.tensor([[int(token_id)]], dtype=torch.long, device=self.device)
+        # decode 只输入新 token，但 attention_mask 必须覆盖完整上下文长度，
+        # 这样模型能把新 token 与已缓存的历史 K/V 对齐。
         logits, states = self.model.decode(
             next_input,
             attention_mask=self._full_attention_mask(),

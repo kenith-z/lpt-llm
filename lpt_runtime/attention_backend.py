@@ -31,6 +31,7 @@ ATTENTION_BACKEND_CAPABILITY_NAMES = (
 
 
 def _as_tuple(value):
+    """把配置字段统一成 tuple，便于能力匹配和日志记录。"""
     if value is None:
         return ()
     if isinstance(value, str):
@@ -58,6 +59,7 @@ class AttentionBackendCapability:
     platforms: tuple[str, ...]
 
     def supports(self, required_capabilities=(), *, dtype=None, platform=None):
+        """判断当前后端是否满足能力、dtype 和平台约束。"""
         for capability_name in _as_tuple(required_capabilities):
             if capability_name not in ATTENTION_BACKEND_CAPABILITY_NAMES:
                 raise ValueError(f"未知 Attention capability: {capability_name}")
@@ -70,6 +72,7 @@ class AttentionBackendCapability:
         return True
 
     def to_dict(self):
+        """序列化后端能力，供 checkpoint/runtime metadata 记录。"""
         return {
             "name": self.name,
             "training": self.training,
@@ -93,6 +96,7 @@ class AttentionBackendAttempt:
     reason: str | None = None
 
     def to_dict(self):
+        """序列化一次候选后端尝试结果。"""
         return {
             "backend": self.backend,
             "status": self.status,
@@ -113,6 +117,7 @@ class AttentionBackendDecision:
     warnings: tuple[str, ...] = ()
 
     def to_log_dict(self):
+        """序列化最终选择结果，便于每层 Attention 后端审计。"""
         return {
             "selected_backend": self.selected_backend,
             "policy": self.policy,
@@ -135,6 +140,7 @@ def normalize_dtype_name(dtype):
 
 
 def normalize_platform_name(platform):
+    """把 sys.platform 这类平台字符串规整到能力表使用的名称。"""
     platform_text = str(platform).lower()
     if platform_text.startswith("linux"):
         return "linux"
@@ -146,6 +152,7 @@ def normalize_platform_name(platform):
 
 
 def _sdpa_supports_gqa():
+    """探测当前 PyTorch SDPA 是否支持 enable_gqa 参数。"""
     try:
         import inspect
 
@@ -205,6 +212,7 @@ def detect_available_attention_backends():
 
 
 def _normalize_priority(priority):
+    """校验并规范化 attention backend 优先级。"""
     normalized_priority = tuple(
         str(backend)
         for backend in (_as_tuple(priority) or DEFAULT_ATTENTION_BACKEND_PRIORITY)
@@ -255,6 +263,8 @@ def resolve_attention_backend(
             dtype=dtype,
             platform=current_platform,
         ):
+            # 不满足 sliding_window / longrope2 / dtype / platform 等硬约束时直接跳过，
+            # 避免自动选择一个语义不完整但可 import 的后端。
             attempts.append(AttentionBackendAttempt(backend, "skipped", "capability_mismatch"))
             continue
 

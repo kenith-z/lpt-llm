@@ -26,6 +26,7 @@ DEFAULT_LONG_CONTEXT_EVAL_CONFIG = LongContextEvalConfig()
 
 
 def _target_rank(logits, target_token_id):
+    """计算目标 token 在最后一步 logits 中的排序名次。"""
     last_logits = logits[0, -1].float()
     sorted_indices = torch.argsort(last_logits, descending=True)
     rank = (sorted_indices == int(target_token_id)).nonzero(as_tuple=False)
@@ -35,11 +36,13 @@ def _target_rank(logits, target_token_id):
 
 
 def _target_logprob(logits, target_token_id):
+    """计算目标 token 在最后一步的 log probability。"""
     log_probs = F.log_softmax(logits[0, -1].float(), dim=-1)
     return float(log_probs[int(target_token_id)].detach().cpu())
 
 
 def _mean_optional(values):
+    """跳过 None 后求均值，没有有效值时返回 0。"""
     values = [float(value) for value in values if value is not None]
     return 0.0 if not values else sum(values) / len(values)
 
@@ -104,6 +107,7 @@ def _build_probe_inputs(*, vocabulary_size, sequence_length, attention_window_si
     )
     input_ids[0, needle_index] = needle_token_id
     input_ids[0, -1] = 2
+    # code/math 和 format 代理输入较短，主要用于确认局部窗口内普通 next-token 路径仍可运行。
     code_math_ids = build_deterministic_input(
         vocabulary_size,
         1,
@@ -128,6 +132,7 @@ def _run_model_probe(model, *, input_ids, code_math_ids, format_ids, needle_toke
         with torch.no_grad():
             logits, states = model.prefill(input_ids, request_id=request_id)
             loss, ppl = next_token_loss(logits, input_ids)
+            # 代理项不写入 KV cache，避免它们干扰主长上下文 request 的状态观察。
             code_logits, _ = model(
                 code_math_ids,
                 request_id=f"{request_id}-code",
@@ -170,6 +175,7 @@ class LongContextAdmissionReport:
     checkpoint_metadata: dict | None = None
 
     def to_dict(self):
+        """生成长上下文准入 JSON 载荷。"""
         payload = {
             "report_type": "lpt_v2_long_context_admission",
             "preset": self.preset,
@@ -187,6 +193,7 @@ class LongContextAdmissionReport:
         return payload
 
     def to_markdown(self):
+        """生成长上下文准入 Markdown 报告。"""
         needle = self.metrics["needle"]
         long_text = self.metrics["long_text_ppl"]
         decision = self.metrics["quality_decision"]
@@ -228,14 +235,17 @@ class LongContextAdmissionReport:
 
 
 def _markdown_value(value):
+    """把可选值渲染为 Markdown 单元格。"""
     return "n/a" if value is None else str(value)
 
 
 def _markdown_float(value, *, digits=4):
+    """把可选浮点值渲染为 Markdown 单元格。"""
     return "n/a" if value is None else f"{float(value):.{digits}f}"
 
 
 def _checkpoint_training_metadata(checkpoint):
+    """提取 checkpoint 中与实验可追溯性相关的训练元数据。"""
     extra = checkpoint.get("runtime_metadata", {}).get("extra", {})
     tokenizer_metadata = extra.get("tokenizer_metadata") or {}
     return {
@@ -268,6 +278,7 @@ def _run_checkpoint_admission(
     dtype,
     needle_depth,
 ):
+    """加载真实 checkpoint 后运行长上下文准入。"""
     loaded = load_lpt_v2_checkpoint(checkpoint_path, map_location="cpu", strict=True)
     return run_lpt_v2_long_context_admission_for_model(
         model=loaded.model,
@@ -311,6 +322,7 @@ def run_lpt_v2_long_context_admission_for_model(
         int(GlobalConfig.inference_rope_cache_max_sequence_length),
         int(sequence_length),
     )
+    # 长上下文评测可能临时超过默认推理 RoPE cache，上调全局上限但不写回 checkpoint。
     input_ids, code_math_ids, format_ids, needle_token_id, needle_index = _build_probe_inputs(
         vocabulary_size=vocabulary_size,
         sequence_length=sequence_length,
@@ -336,6 +348,7 @@ def run_lpt_v2_long_context_admission_for_model(
     k_adapter_delta_norm = float(retnet_mechanism["k_adapter_delta_norm"])
     context_adapter_delta_norm = float(retnet_mechanism["context_adapter_delta_norm"])
     paged_window = int(states[0].attention.paged_kv_ref.window_token_count)
+    # 机制准入只要求 RetNet 摘要 token_count 跨过局部窗口；质量收益要看真实评测集。
     mechanism_ready = bool(retnet_tokens > paged_window)
     status = "admit_checkpoint_path" if mechanism_ready else "close_or_debug"
     reason = (
@@ -465,6 +478,7 @@ def run_lpt_v2_long_context_admission(
         preset=preset,
         **common_overrides,
     )
+    # 无 checkpoint 路径只做 assist vs no_assist 机制对照，随机初始化不能证明质量收益。
     no_assist_config = build_lpt_v2_profile_config(
         LPT_V2_PAGED_KV_PROFILE,
         preset=preset,

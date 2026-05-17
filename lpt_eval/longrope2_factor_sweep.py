@@ -54,6 +54,7 @@ def summarize_longrope2_factors(factors):
 
 
 def _normalize_candidate_name(name):
+    """规范化候选名称，名称会用于报告和去重。"""
     normalized = str(name).strip()
     if not normalized:
         raise ValueError("LongRoPE2 候选名称不能为空。")
@@ -61,6 +62,7 @@ def _normalize_candidate_name(name):
 
 
 def _normalize_candidate_factors(model_config, factors):
+    """校验候选 factors 数量必须等于 head_dim/2。"""
     values = tuple(float(value) for value in factors)
     rotary_dims = int(model_config.head_dim) // 2
     if len(values) != rotary_dims:
@@ -74,6 +76,7 @@ def _normalize_candidate_factors(model_config, factors):
 
 
 def _mean(values):
+    """跳过 None 后求均值。"""
     values = [float(value) for value in values if value is not None]
     if not values:
         return None
@@ -81,6 +84,7 @@ def _mean(values):
 
 
 def _format_float(value, digits=4):
+    """Markdown 中的可选浮点格式化。"""
     return "n/a" if value is None else f"{float(value):.{digits}f}"
 
 
@@ -94,6 +98,7 @@ class LongRoPE2FactorCandidate:
     factor_max_sequence_length: int | None = None
 
     def to_dict(self):
+        """生成候选因子的 JSON 摘要。"""
         return {
             "name": self.name,
             "source": self.source,
@@ -124,6 +129,7 @@ def build_bootstrap_factor_candidate(name, model_config, sequence_length):
 
 
 def _append_candidate(candidates, seen_names, candidate, model_config):
+    """校验、去重并追加一个候选因子。"""
     normalized = LongRoPE2FactorCandidate(
         name=_normalize_candidate_name(candidate.name),
         long_factors=_normalize_candidate_factors(model_config, candidate.long_factors),
@@ -210,6 +216,7 @@ def build_longrope2_factor_candidates(
 
 
 def _build_candidate_model_config(base_config, candidate, *, max_sequence_length):
+    """在评测进程内生成临时 ModelConfig，不写回 checkpoint。"""
     factor_max_sequence_length = max(
         int(max_sequence_length),
         int(candidate.factor_max_sequence_length or 0),
@@ -228,6 +235,7 @@ def _build_candidate_model_config(base_config, candidate, *, max_sequence_length
 
 
 def _load_candidate_model(loaded_checkpoint, candidate_config, *, device, dtype):
+    """用候选配置重建模型，再加载同一 checkpoint 权重。"""
     target_device = resolve_eval_device(device)
     target_dtype = resolve_eval_dtype(dtype, device=target_device)
     GlobalConfig.parameter_dtype = target_dtype
@@ -241,6 +249,7 @@ def _load_candidate_model(loaded_checkpoint, candidate_config, *, device, dtype)
 
 
 def _release_candidate_model(model):
+    """释放候选模型，降低 sweep 多候选循环的显存残留。"""
     del model
     gc.collect()
     if torch.cuda.is_available():
@@ -248,6 +257,7 @@ def _release_candidate_model(model):
 
 
 def _summarize_candidate_cases(case_results):
+    """汇总单个候选在所有长上下文 case 上的表现。"""
     if not case_results:
         return {
             "case_count": 0,
@@ -305,6 +315,7 @@ class LongRoPE2FactorSweepReport:
     summary: dict
 
     def to_dict(self):
+        """生成 factor sweep JSON 载荷。"""
         return {
             "report_type": "lpt_v2_longrope2_factor_sweep",
             "checkpoint_path": self.checkpoint_path,
@@ -319,6 +330,7 @@ class LongRoPE2FactorSweepReport:
         }
 
     def to_markdown(self):
+        """生成 factor sweep Markdown 报告。"""
         lines = [
             "# LPT v2 LongRoPE2 Factor Sweep",
             "",
@@ -365,6 +377,7 @@ class LongRoPE2FactorSweepReport:
 
 
 def _build_sweep_summary(candidates):
+    """从候选摘要中挑选平均 loss 最低的候选。"""
     valid_candidates = [
         candidate
         for candidate in candidates
@@ -433,6 +446,7 @@ def run_lpt_v2_longrope2_factor_sweep(
         )
         model = None
         try:
+            # 每个候选使用独立模型实例，确保 RoPE factors 只影响当前候选 case。
             model = _load_candidate_model(
                 loaded,
                 candidate_config,

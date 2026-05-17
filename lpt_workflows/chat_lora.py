@@ -43,16 +43,19 @@ CHAT_LORA_MANIFEST_PATH = CHAT_LORA_RECIPE.manifest_path
 
 
 def _resolve_chat_lora_artifact_dir(base_source):
+    """按基座来源隔离 LoRA 训练产物目录。"""
     if base_source not in VALID_LORA_BASE_SOURCES:
         raise ValueError(f"不支持的 LoRA 基座来源: {base_source}")
     return CHAT_LORA_RECIPE.artifact_dir / f"from_{base_source}"
 
 
 def _resolve_chat_lora_checkpoint_root(base_source):
+    """返回指定基座来源的 LoRA latest checkpoint 根目录。"""
     return _resolve_chat_lora_artifact_dir(base_source) / "checkpoints" / "latest"
 
 
 def _resolve_chat_lora_adapter_path(base_source):
+    """返回指定基座来源的 LoRA adapter 推理权重路径。"""
     return _resolve_chat_lora_artifact_dir(base_source) / "weights" / "adapter_weights.pth"
 
 
@@ -72,6 +75,7 @@ def resolve_lora_base_initial_checkpoint(base_source):
 
 
 def resolve_chat_lora_resume_checkpoint(base_source):
+    """查找指定基座来源的 LoRA 可续训 checkpoint。"""
     checkpoint_root = _resolve_chat_lora_checkpoint_root(base_source)
     return resolve_latest_training_checkpoint(checkpoint_root, lora_mode=True)
 
@@ -130,6 +134,7 @@ def finetune_chat_with_lora(
     if resume_checkpoint is not None:
         adapter_path = resume_checkpoint / "adapter.pt"
         if adapter_path.exists():
+            # resume 时以 adapter checkpoint 内保存的 LoRAConfig 为准，避免 CLI 覆盖破坏权重形状。
             lora_config = load_lora_adapter_config(adapter_path)
     attach_lora_adapters(model, lora_config)
     if resume_checkpoint is not None:
@@ -191,6 +196,7 @@ def finetune_chat_with_lora(
 
 
 def build_parser():
+    """构造 chat_lora CLI parser。"""
     parser = ArgumentParser(description="运行 LPT v2 chat LoRA 阶段。")
     parser.add_argument("--manifest", type=Path, default=CHAT_LORA_MANIFEST_PATH, help="chat LoRA manifest。")
     parser.add_argument("--base-source", choices=sorted(VALID_LORA_BASE_SOURCES), default=CHAT_LORA_RECIPE.lora_base_source, help="LoRA 基座来源。")
@@ -205,6 +211,7 @@ def build_parser():
 
 
 def main(argv=None):
+    """chat_lora 命令行入口。"""
     args = build_parser().parse_args(argv)
     finetune_chat_with_lora(
         args.manifest,

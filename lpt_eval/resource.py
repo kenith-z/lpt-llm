@@ -40,6 +40,7 @@ class ResourceReport:
     metrics: dict
 
     def to_dict(self):
+        """生成资源报告 JSON 载荷。"""
         return {
             "report_type": "lpt_v2_resource",
             "profile": self.profile,
@@ -53,6 +54,7 @@ class ResourceReport:
         }
 
     def to_markdown(self):
+        """生成资源报告 Markdown 表格。"""
         metrics = self.metrics
         lines = [
             "# LPT v2 Resource Report",
@@ -103,11 +105,13 @@ class ResourceReport:
 
 
 def _synchronize_if_needed(device):
+    """CUDA 计时时同步设备，CPU 计时时为空操作。"""
     if torch.device(device).type == "cuda":
         torch.cuda.synchronize(device)
 
 
 def _state_bytes(states):
+    """估算 RetNet/xLSTM request-bound 状态张量字节数。"""
     retnet_bytes = 0
     xlstm_bytes = 0
     seen_retnet_slots = set()
@@ -115,6 +119,7 @@ def _state_bytes(states):
         if state.retnet_assist is not None and state.retnet_assist.summary is not None:
             state_slot = int(state.retnet_assist.state_slot)
             if state_slot not in seen_retnet_slots:
+                # RetNet 可能按 group 共享 state_slot，资源统计按唯一槽位去重。
                 summary = state.retnet_assist.summary
                 retnet_bytes += int(summary.numel() * summary.element_size())
                 seen_retnet_slots.add(state_slot)
@@ -125,6 +130,7 @@ def _state_bytes(states):
 
 
 def _router_metrics(states):
+    """汇总 MoE router 观测指标。"""
     entropies = []
     load_losses = []
     z_losses = []
@@ -142,6 +148,7 @@ def _router_metrics(states):
 
 
 def _xlstm_observability(states):
+    """汇总 xLSTMMemory adapter 与状态范数指标。"""
     effective_betas = []
     memory_norms = []
     adapter_delta_norms = []
@@ -159,6 +166,7 @@ def _xlstm_observability(states):
 
 
 def _retnet_observability(states):
+    """汇总 RetNetAssist adapter 与上下文注入指标。"""
     summary_norms = []
     q_delta_norms = []
     k_delta_norms = []
@@ -226,6 +234,7 @@ def run_lpt_v2_resource_report(
 
     def make_pre_hook(layer_index):
         def pre_hook(_module, _args):
+            # hook 内同步是为了让 per-layer 计时接近真实 CUDA kernel 完成时间。
             _synchronize_if_needed(target_device)
             layer_times[(layer_index, "start")].append(perf_counter())
         return pre_hook
@@ -240,6 +249,7 @@ def run_lpt_v2_resource_report(
         return post_hook
 
     for layer_index, layer in enumerate(model.layers):
+        # 只在报告函数内部临时注册 hook，函数结束后立即 remove，避免污染调用方模型。
         handles.append(layer.register_forward_pre_hook(make_pre_hook(layer_index)))
         handles.append(layer.register_forward_hook(make_post_hook(layer_index)))
 
@@ -265,6 +275,7 @@ def run_lpt_v2_resource_report(
         first_token_latency_ms = 0.0
         decode_elapsed_total = 0.0
         for step in range(int(decode_steps)):
+            # decode tokens/sec 统计逐 token 延迟，更接近会话式推理成本。
             next_ids = build_deterministic_input(
                 vocabulary_size,
                 batch_size,

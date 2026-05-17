@@ -37,14 +37,17 @@ CHAT_SFT_ARTIFACT_DIR = CHAT_SFT_RECIPE.artifact_dir
 
 
 def resolve_chat_sft_checkpoint_root():
+    """返回 chat_sft latest checkpoint 根目录。"""
     return CHAT_SFT_ARTIFACT_DIR / "checkpoints" / "latest"
 
 
 def resolve_chat_sft_inference_weight_path():
+    """返回 chat_sft 推理权重导出路径。"""
     return CHAT_SFT_ARTIFACT_DIR / "weights" / "model_weights.pth"
 
 
 def resolve_chat_sft_resume_checkpoint():
+    """查找 chat_sft 可续训 checkpoint。"""
     checkpoint_root = resolve_chat_sft_checkpoint_root()
     return resolve_latest_training_checkpoint(checkpoint_root, lora_mode=False)
 
@@ -75,6 +78,7 @@ def load_chat_sft_model_for_inference(execution_config=None, *, device="auto", d
 
 
 def _load_or_initialize_model(args, tokenizer):
+    """优先 resume chat_sft，其次加载 text_pretrain，最后随机初始化。"""
     resume_checkpoint = None if args.no_resume else resolve_chat_sft_resume_checkpoint()
     if resume_checkpoint is not None:
         checkpoint_file = resume_checkpoint / "model.pt"
@@ -82,6 +86,7 @@ def _load_or_initialize_model(args, tokenizer):
 
     initial_checkpoint = resolve_text_pretrain_initial_checkpoint()
     if initial_checkpoint is not None:
+        # SFT 阶段以 text_pretrain 产物为默认初始化，符合三阶段主线。
         return load_checkpoint_model(initial_checkpoint, device=args.device, dtype=args.dtype, strict=True), None
 
     print("警告: 未找到 text_pretrain checkpoint，chat_sft 将从随机初始化开始。")
@@ -158,6 +163,7 @@ def train_chat_sft_model(
 
 
 def build_parser():
+    """构造 chat_sft CLI parser。"""
     parser = ArgumentParser(description="运行 LPT v2 chat SFT 阶段。")
     parser.add_argument("--manifest", type=Path, default=CHAT_SFT_MANIFEST_PATH, help="chat SFT manifest。")
     parser.add_argument("--eval-manifest", type=Path, default=None, help="验证 manifest。")
@@ -167,6 +173,7 @@ def build_parser():
 
 
 def main(argv=None):
+    """chat_sft 命令行入口。"""
     args = build_parser().parse_args(argv)
     train_chat_sft_model(args.manifest, eval_manifest_path=args.eval_manifest, args=args)
     return 0

@@ -42,11 +42,13 @@ class DeviceInfo:
 
     @property
     def memory_weight(self):
+        """用于 auto device map 的权重；未知显存时退化为均分。"""
         if self.total_memory_bytes is None or self.total_memory_bytes <= 0:
             return 1.0
         return float(self.total_memory_bytes)
 
     def to_dict(self):
+        """序列化逻辑设备信息，报告中同时保留 CUDA_VISIBLE_DEVICES token。"""
         return {
             "logical_index": self.logical_index,
             "logical_name": self.logical_name,
@@ -69,6 +71,7 @@ class ExecutionConfig:
     print_device_map: bool = True
 
     def __post_init__(self):
+        """校验执行模式，device_map 延迟到 resolve 阶段解析。"""
         normalized_mode = str(self.mode)
         if normalized_mode not in SUPPORTED_EXECUTION_MODES:
             raise ValueError(f"execution mode 必须是 {SUPPORTED_EXECUTION_MODES} 之一。")
@@ -89,19 +92,23 @@ class DeviceMapPlan:
 
     @property
     def is_model_parallel(self):
+        """当前计划是否为按层模型并行。"""
         return self.mode == MODEL_PARALLEL_EXECUTION_MODE
 
     @property
     def torch_primary_device(self):
+        """返回 PyTorch 设备对象形式的主设备。"""
         return torch.device(self.primary_device)
 
     @property
     def state_dict_map_location(self):
+        """模型并行加载时先落 CPU，避免权重被一次性加载到错误 GPU。"""
         if self.is_model_parallel:
             return "cpu"
         return self.torch_primary_device
 
     def to_dict(self):
+        """序列化执行计划，供日志、报告和实验治理记录。"""
         return {
             "mode": self.mode,
             "primary_device": self.primary_device,
@@ -154,6 +161,7 @@ def discover_visible_cuda_devices():
 
 
 def _normalize_device_name(device):
+    """把 0 / '0' 这类输入统一成 PyTorch 逻辑设备名 cuda:0。"""
     if isinstance(device, int):
         return f"cuda:{device}"
     device_text = str(device)
@@ -163,6 +171,7 @@ def _normalize_device_name(device):
 
 
 def _validate_device_names(device_names, *, visible_cuda_devices, allow_cpu=True):
+    """校验 device_map 中的设备是否对当前进程可见。"""
     visible_names = {device.logical_name for device in visible_cuda_devices}
     invalid_devices = []
     for device_name in device_names:
@@ -179,6 +188,7 @@ def _validate_device_names(device_names, *, visible_cuda_devices, allow_cpu=True
 
 
 def _allocate_layers_by_memory(num_layers, visible_cuda_devices):
+    """按可见 GPU 显存比例为层分配逻辑设备。"""
     if num_layers <= 0:
         raise ValueError("num_layers 必须为正整数。")
     if not visible_cuda_devices:
@@ -196,6 +206,7 @@ def _allocate_layers_by_memory(num_layers, visible_cuda_devices):
 
     layer_devices = []
     for layer_index in range(num_layers):
+        # 用层中心点落在哪个累计显存区间来分配设备，简单且保持连续层段。
         midpoint = (layer_index + 0.5) / num_layers * total_weight
         target_device_index = 0
         while (
@@ -208,6 +219,7 @@ def _allocate_layers_by_memory(num_layers, visible_cuda_devices):
 
 
 def _load_device_map_spec(device_map):
+    """解析 inline device_map、auto 或 JSON 文件路径。"""
     if isinstance(device_map, (dict, list, tuple)):
         return device_map, "inline"
     if device_map is None:
@@ -223,6 +235,7 @@ def _load_device_map_spec(device_map):
 
 
 def _build_layer_devices_from_manual_spec(spec, num_layers):
+    """从手工 device_map 构造每层设备和模块级设备映射。"""
     if isinstance(spec, (list, tuple)):
         layer_devices = tuple(_normalize_device_name(device) for device in spec)
         if len(layer_devices) != num_layers:
@@ -267,6 +280,7 @@ def _build_layer_devices_from_manual_spec(spec, num_layers):
 
 
 def _resolve_single_plan(*, visible_cuda_devices, source):
+    """生成单设备执行计划；有 CUDA 时选择当前逻辑 cuda:0，否则 CPU。"""
     if visible_cuda_devices:
         primary_device = visible_cuda_devices[0].logical_name
     else:
@@ -301,6 +315,7 @@ def resolve_execution_plan(
 
     requested_mode = config.mode
     if requested_mode == AUTO_EXECUTION_MODE:
+        # auto 只在当前进程可见 GPU 超过 1 张时尝试模型并行。
         requested_mode = MODEL_PARALLEL_EXECUTION_MODE if len(visible_devices) > 1 else SINGLE_EXECUTION_MODE
 
     if requested_mode == SINGLE_EXECUTION_MODE:
@@ -372,9 +387,11 @@ def apply_inference_execution_plan(model, execution_plan):
         )
 
     primary_device = torch.device(plan.primary_device)
+    # embedding 与 lm_head 共享权重，因此两者必须放在同一主设备上。
     model.token_embedding.to(primary_device)
     model._rope_caches.to(primary_device)
     for layer, device_name in zip(model.layers, plan.layer_devices):
+        # 当前模型的 forward 会在层边界迁移 hidden_states，故可以按 block 粒度放置。
         layer.to(torch.device(device_name))
     model.final_norm.to(torch.device(plan.module_devices.get("final_norm", plan.primary_device)))
     # lm_head 与 token_embedding 共享权重，必须固定在同一设备。

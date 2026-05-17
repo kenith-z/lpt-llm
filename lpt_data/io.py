@@ -40,6 +40,7 @@ class StreamingManifestDataset(IterableDataset):
         total_count,
         seed=None,
     ):
+        """保存 manifest 展开后的流式计划和统计信息。"""
         super().__init__()
         self.manifest_path = Path(manifest_path)
         self.entry_plans = tuple(entry_plans)
@@ -53,9 +54,11 @@ class StreamingManifestDataset(IterableDataset):
         self._iteration_index = 0
 
     def __len__(self):
+        """返回按 manifest weight/sample_limit 展开后的样本数。"""
         return self.total_count
 
     def _next_iteration_seed(self):
+        """每轮迭代生成独立 shuffle seed，固定 seed 时仍可跨 epoch 变化。"""
         if self.seed is None:
             return random.randrange(0, 2**31)
         current_seed = int(self.seed) + self._iteration_index
@@ -63,6 +66,7 @@ class StreamingManifestDataset(IterableDataset):
         return current_seed
 
     def _iter_manifest_records(self):
+        """按 entry plan 顺序流式产出被选中的记录。"""
         for entry_plan in self.entry_plans:
             if entry_plan.repeat_count > 0:
                 for _ in range(entry_plan.repeat_count):
@@ -83,6 +87,7 @@ class StreamingManifestDataset(IterableDataset):
         yield from self._iter_manifest_records()
 
     def __iter__(self):
+        """训练迭代入口：对流式记录做 buffer shuffle。"""
         rng = random.Random(self._next_iteration_seed())
         yield from _iter_buffer_shuffled_records(
             self._iter_manifest_records(),
@@ -92,6 +97,7 @@ class StreamingManifestDataset(IterableDataset):
 
 
 def _iter_dataset_records_with_index(dataset_path, expected_types=None):
+    """逐行读取 JSONL 并返回原始行内索引和规范化记录。"""
     dataset_path = Path(dataset_path)
     if dataset_path.suffix != ".jsonl":
         raise ValueError(f"只支持 JSONL 数据集，当前路径为: {dataset_path}")
@@ -137,6 +143,7 @@ def summarize_dataset_sources(records):
 
 
 def _resolve_manifest_dataset_path(manifest_path, dataset_path):
+    """把 manifest 内相对路径解析到 manifest 所在目录下。"""
     resolved_path = Path(dataset_path)
     if resolved_path.is_absolute():
         return resolved_path
@@ -144,6 +151,7 @@ def _resolve_manifest_dataset_path(manifest_path, dataset_path):
 
 
 def _deterministic_pick(records, target_count, seed_text):
+    """用稳定 seed 从内存记录中抽样，保证同一 manifest 展开可复现。"""
     if target_count <= 0:
         return []
     if target_count >= len(records):
@@ -154,6 +162,7 @@ def _deterministic_pick(records, target_count, seed_text):
 
 
 def _apply_dataset_entry_policy(records, entry, *, seed_text):
+    """在已加载记录上应用 sample_limit 和 weight 策略。"""
     sample_limit = entry.get("sample_limit")
     if sample_limit is not None:
         if not isinstance(sample_limit, int) or sample_limit <= 0:
@@ -177,6 +186,7 @@ def _apply_dataset_entry_policy(records, entry, *, seed_text):
     repeated_records = []
     integer_part = int(weight)
     fractional_part = float(weight) - integer_part
+    # weight > 1 时，整数部分直接重复，分数部分做确定性抽样，避免随机扩大数据集。
     for _ in range(integer_part):
         repeated_records.extend(records)
 
@@ -190,6 +200,7 @@ def _apply_dataset_entry_policy(records, entry, *, seed_text):
 
 
 def _load_manifest_entries(manifest_path):
+    """读取 manifest 并返回 datasets 条目列表。"""
     manifest_path = Path(manifest_path)
     with manifest_path.open("r", encoding="utf-8") as manifest_file:
         manifest = json.load(manifest_file)
@@ -201,12 +212,14 @@ def _load_manifest_entries(manifest_path):
 
 
 def _normalize_weight(weight):
+    """校验并归一化 manifest weight。"""
     if not isinstance(weight, (int, float)) or weight < 0:
         raise ValueError(f"weight 非法: {weight}")
     return float(weight)
 
 
 def _count_dataset_records(dataset_path, expected_types):
+    """只扫描记录数量，不把数据集整体加载进内存。"""
     total_count = 0
     for _, _ in _iter_dataset_records_with_index(dataset_path, expected_types=expected_types):
         total_count += 1
@@ -214,6 +227,7 @@ def _count_dataset_records(dataset_path, expected_types):
 
 
 def _pick_indices_from_count(total_count, target_count, seed_text):
+    """基于记录总数抽取稳定索引集合。"""
     if target_count <= 0:
         return ()
     if target_count >= total_count:
@@ -223,6 +237,7 @@ def _pick_indices_from_count(total_count, target_count, seed_text):
 
 
 def _pick_from_base_selection(base_indices, base_count, total_count, target_count, seed_text):
+    """在 sample_limit 后的基础集合上继续抽取 weight 分数部分索引。"""
     if target_count <= 0:
         return ()
     if target_count >= base_count:
@@ -238,6 +253,7 @@ def _pick_from_base_selection(base_indices, base_count, total_count, target_coun
 
 
 def _build_manifest_entry_plan(manifest_path, entry, expected_types):
+    """把单个 manifest entry 编译成可流式执行的采样计划。"""
     dataset_path = entry.get("path")
     if not isinstance(dataset_path, str) or not dataset_path.strip():
         raise ValueError("manifest dataset 配置缺少合法 path。")
@@ -262,6 +278,7 @@ def _build_manifest_entry_plan(manifest_path, entry, expected_types):
             )
 
     weight = _normalize_weight(entry.get("weight", 1.0))
+    # plan 只保存索引和重复次数，不保存记录内容；大数据集可在训练时逐行读取。
     if weight == 0:
         repeat_count = 0
         extra_indices = ()
@@ -300,6 +317,7 @@ def _build_manifest_entry_plan(manifest_path, entry, expected_types):
 
 
 def _iter_selected_records(dataset_path, selected_indices, expected_types):
+    """按索引过滤 JSONL 记录；selected_indices=None 表示全量读取。"""
     selected_index_set = None if selected_indices is None else set(selected_indices)
     for record_index, record in _iter_dataset_records_with_index(dataset_path, expected_types=expected_types):
         if selected_index_set is None or record_index in selected_index_set:
@@ -307,6 +325,7 @@ def _iter_selected_records(dataset_path, selected_indices, expected_types):
 
 
 def _summarize_entry_plan(entry_plan, expected_types):
+    """根据 entry plan 重新扫描并统计类型/来源分布。"""
     if entry_plan.selected_count == 0:
         return Counter(), Counter()
 
@@ -328,6 +347,7 @@ def _summarize_entry_plan(entry_plan, expected_types):
 
 
 def _iter_buffer_shuffled_records(records, buffer_size, rng):
+    """有限缓冲区 shuffle，兼顾流式读取和近似随机化。"""
     if buffer_size <= 1:
         yield from records
         return
@@ -338,6 +358,7 @@ def _iter_buffer_shuffled_records(records, buffer_size, rng):
             buffer.append(record)
             continue
 
+        # 从缓冲区随机弹出一个样本，再用新样本填补该位置，避免全量加载后再 shuffle。
         picked_index = rng.randrange(len(buffer))
         yield buffer[picked_index]
         buffer[picked_index] = record
@@ -373,6 +394,7 @@ def build_streaming_manifest_dataset(
             entry,
             expected_types=expected_types,
         )
+        # summary 单独扫描一遍，是为了让训练入口在流式模式下仍能展示数据类型/来源分布。
         entry_type_counter, entry_source_counter = _summarize_entry_plan(
             entry_plan,
             expected_types=expected_types,
@@ -445,6 +467,7 @@ def load_dataset_manifest(manifest_path, expected_types=None):
             entry,
             seed_text=f"{manifest_path}:{entry_name}:{resolved_dataset_path}",
         )
+        # 非流式路径主要服务小数据 smoke 和测试，因此这里保留完整记录列表。
         records.extend(mixed_records)
         loaded_datasets.append(
             {

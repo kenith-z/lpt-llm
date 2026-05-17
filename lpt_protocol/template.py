@@ -69,6 +69,7 @@ def get_template_spec(template_version=None):
 
 
 def _normalize_content(content, *, label):
+    """校验模板内容字段，去除首尾空白并拒绝空字符串。"""
     if not isinstance(content, str):
         raise TypeError(f"{label} 必须是字符串。")
     normalized = content.strip()
@@ -120,6 +121,7 @@ def render_prompt_from_messages(messages, template_version=None, add_generation_
 
 
 def _render_chat_segments(messages, template_version=None):
+    """把 chat 样本渲染成带 supervise 标记的训练片段。"""
     template_spec = get_template_spec(template_version)
     normalized_messages = validate_messages(messages)
     rendered_segments = [RenderedSegment(template_spec.prefix, supervise=False)]
@@ -129,6 +131,7 @@ def _render_chat_segments(messages, template_version=None):
         role = message["role"]
         rendered_segments.append(RenderedSegment(template_spec.role_tokens[role], supervise=False))
         is_assistant = role == ASSISTANT_ROLE
+        # 只监督 assistant 内容和其 EOS；system/user/observation 作为条件上下文。
         rendered_segments.append(RenderedSegment(message["content"], supervise=is_assistant))
         if is_assistant:
             assistant_message_count += 1
@@ -141,6 +144,7 @@ def _render_chat_segments(messages, template_version=None):
 
 
 def _render_text_segments(text, template_version=None):
+    """把纯文本样本渲染成全监督片段。"""
     template_spec = get_template_spec(template_version)
     normalized_text = _normalize_content(text, label="text 样本文本")
     return [

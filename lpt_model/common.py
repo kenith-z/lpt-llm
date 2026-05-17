@@ -24,11 +24,13 @@ class RMSNorm(nn.Module):
     """均方根归一化。"""
 
     def __init__(self, dim, eps=1e-6):
+        """初始化 RMSNorm scale 参数。"""
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim))
         self.eps = eps
 
     def forward(self, x):
+        """按最后一维均方根归一化输入。"""
         variance = x.pow(2).mean(dim=-1, keepdim=True)
         return x * torch.rsqrt(variance + self.eps) * self.weight
 
@@ -37,6 +39,7 @@ class SwiGLU(nn.Module):
     """Swish-Gated Linear Unit 前馈网络。"""
 
     def __init__(self, hidden_size):
+        """创建 SwiGLU 三投影结构，intermediate_size 对齐到 256。"""
         super().__init__()
         intermediate_size = int(8 * hidden_size / 3)
         intermediate_size = ((intermediate_size + 255) // 256) * 256
@@ -45,6 +48,7 @@ class SwiGLU(nn.Module):
         self.w3 = nn.Linear(hidden_size, intermediate_size, bias=False)
 
     def forward(self, x):
+        """执行 SwiGLU: w2(silu(w1(x)) * w3(x))。"""
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 

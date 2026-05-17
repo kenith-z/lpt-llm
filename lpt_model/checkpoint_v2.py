@@ -1,4 +1,10 @@
-"""LPT v2 checkpoint schema 与严格加载器。"""
+"""LPT v2 checkpoint schema 与严格加载器。
+
+本模块只接受 `checkpoint_format="lpt_v2_checkpoint"` 且 schema version 为 2
+的产物，不对 v1 checkpoint、旧字段名或旧训练 recipe 做隐式兼容。checkpoint
+保存的是完整 `ModelConfig` 快照、runtime metadata 和模型权重；Paged KV /
+RetNetAssist / xLSTM 的运行态只保存元数据摘要，不保存 request 中间张量。
+"""
 
 from __future__ import annotations
 
@@ -35,6 +41,7 @@ class LoadedLPTV2Checkpoint:
 
 
 def _layer_backend_decisions(model):
+    """收集每层 Attention 后端选择结果，便于报告和 checkpoint 审计。"""
     decisions = []
     for layer_index, layer in enumerate(model.layers):
         decision = layer.attention_mixer.backend_decision.to_log_dict()
@@ -44,6 +51,7 @@ def _layer_backend_decisions(model):
 
 
 def _state_schema_metadata(config):
+    """生成 LayerStateV2 相关 schema 元数据。"""
     return {
         "layer_state_schema": "LayerStateV2",
         "attention_state": {
@@ -160,6 +168,7 @@ def validate_lpt_v2_checkpoint_payload(checkpoint):
 
 
 def _infer_vocabulary_size(state_dict):
+    """从 tied embedding/lm_head 权重推断词表大小。"""
     embedding_weight = state_dict.get("token_embedding.weight")
     if embedding_weight is None:
         embedding_weight = state_dict.get("lm_head.weight")
@@ -184,6 +193,8 @@ def load_lpt_v2_checkpoint(path, *, vocabulary_size=None, map_location="cpu", st
     config = validate_lpt_v2_checkpoint_payload(checkpoint)
     state_dict = checkpoint["model_state_dict"]
     model_vocab_size = _infer_vocabulary_size(state_dict) if vocabulary_size is None else int(vocabulary_size)
+    # 先由 checkpoint 内的完整 ModelConfig 重建结构，再加载权重；strict=True 时任何
+    # missing/unexpected key 都直接失败，避免旧结构权重被“部分兼容”地加载进 v2。
     model = LPTV2(model_vocab_size, config)
     incompatible = model.load_state_dict(state_dict, strict=bool(strict))
     missing_keys = tuple(incompatible.missing_keys)

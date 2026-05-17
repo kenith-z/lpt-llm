@@ -17,6 +17,7 @@ XLSTM_MEMORY_STATE_TYPE = "xlstm_memory_state"
 
 
 def _normalize_request_id(request_id):
+    """统一 request_id 的文本形态，状态池以它作为隔离键。"""
     request_id_text = str(request_id)
     if not request_id_text:
         raise ValueError("request_id 不能为空。")
@@ -33,6 +34,7 @@ class StateReleaseMetadata:
     released_at_token_count: int | None = None
 
     def __post_init__(self):
+        """冻结 dataclass 下仍统一校验 request_id 与 token 计数类型。"""
         object.__setattr__(self, "request_id", _normalize_request_id(self.request_id))
         if self.released_at_token_count is not None:
             object.__setattr__(
@@ -51,6 +53,7 @@ class StateReleaseMetadata:
         )
 
     def to_dict(self):
+        """转换为可写入 checkpoint/runtime metadata 的轻量字典。"""
         return {
             "request_id": self.request_id,
             "released": self.released,
@@ -70,6 +73,7 @@ class PagedKVReference:
     window_token_count: int = 0
 
     def __post_init__(self):
+        """校验页表引用基本形态，禁止负 token 计数进入状态树。"""
         object.__setattr__(self, "request_id", _normalize_request_id(self.request_id))
         object.__setattr__(self, "layer_index", int(self.layer_index))
         object.__setattr__(self, "page_ids", tuple(int(page_id) for page_id in self.page_ids))
@@ -92,6 +96,7 @@ class PagedKVReference:
         )
 
     def to_dict(self):
+        """序列化页表引用；不包含真实 K/V 张量内容。"""
         return {
             "request_id": self.request_id,
             "layer_index": self.layer_index,
@@ -112,6 +117,7 @@ class AttentionLayerState:
     state_type: str = ATTENTION_LAYER_STATE_V2_TYPE
 
     def __post_init__(self):
+        """确保 Attention 状态与 Paged KV 引用绑定同一 request/layer。"""
         object.__setattr__(self, "request_id", _normalize_request_id(self.request_id))
         object.__setattr__(self, "layer_index", int(self.layer_index))
         object.__setattr__(self, "dense_kv_state", tuple(self.dense_kv_state))
@@ -122,6 +128,7 @@ class AttentionLayerState:
                 raise ValueError("Paged KV 引用的 layer_index 必须与 AttentionLayerState 一致。")
 
     def trim_paged_kv(self, kept_page_ids, *, token_count=None, window_token_count=None):
+        """只替换 Paged KV 引用，保持 Attention 状态其它字段不变。"""
         if self.paged_kv_ref is None:
             return self
         return replace(
@@ -134,6 +141,7 @@ class AttentionLayerState:
         )
 
     def to_dict(self):
+        """序列化 Attention 状态摘要，dense KV 只暴露张量数量。"""
         return {
             "state_type": self.state_type,
             "request_id": self.request_id,
@@ -163,6 +171,7 @@ class RetNetAssistState:
     state_type: str = RETNET_ASSIST_STATE_TYPE
 
     def __post_init__(self):
+        """规范化 RetNet 状态槽和观测指标，保证 checkpoint 元数据可 JSON 化。"""
         object.__setattr__(self, "request_id", _normalize_request_id(self.request_id))
         object.__setattr__(self, "layer_index", int(self.layer_index))
         state_slot = self.layer_index if self.state_slot is None else int(self.state_slot)
@@ -190,12 +199,14 @@ class RetNetAssistState:
         object.__setattr__(self, "release_metadata", release_metadata)
 
     def mark_released(self, reason, token_count=None):
+        """标记 RetNet 状态已释放，实际张量由状态池移除。"""
         return replace(
             self,
             release_metadata=self.release_metadata.mark_released(reason, token_count),
         )
 
     def to_dict(self):
+        """序列化 RetNet 观测指标，不序列化 summary 张量。"""
         return {
             "state_type": self.state_type,
             "request_id": self.request_id,
@@ -226,6 +237,7 @@ class MoELayerState:
     state_type: str = MOE_LAYER_STATE_TYPE
 
     def __post_init__(self):
+        """规范化 MoE router 观测计数。"""
         object.__setattr__(self, "request_id", _normalize_request_id(self.request_id))
         object.__setattr__(self, "layer_index", int(self.layer_index))
         object.__setattr__(
@@ -235,6 +247,7 @@ class MoELayerState:
         )
 
     def to_dict(self):
+        """序列化 MoE 运行指标，供资源和 baseline 报告使用。"""
         return {
             "state_type": self.state_type,
             "request_id": self.request_id,
@@ -265,6 +278,7 @@ class xLSTMMemoryState:
     state_type: str = XLSTM_MEMORY_STATE_TYPE
 
     def __post_init__(self):
+        """校验 xLSTM 记忆状态计数和观测指标。"""
         object.__setattr__(self, "request_id", _normalize_request_id(self.request_id))
         object.__setattr__(self, "layer_index", int(self.layer_index))
         object.__setattr__(self, "token_count", int(self.token_count))
@@ -283,12 +297,14 @@ class xLSTMMemoryState:
         object.__setattr__(self, "release_metadata", release_metadata)
 
     def mark_released(self, reason, token_count=None):
+        """标记 xLSTM 状态已释放，实际张量由状态池移除。"""
         return replace(
             self,
             release_metadata=self.release_metadata.mark_released(reason, token_count),
         )
 
     def to_dict(self):
+        """序列化 xLSTM 记忆指标，不写入 memory 张量本体。"""
         return {
             "state_type": self.state_type,
             "request_id": self.request_id,
@@ -315,6 +331,7 @@ class LayerStateV2:
     xlstm_memory: xLSTMMemoryState | None = None
 
     def __post_init__(self):
+        """校验同一 LayerStateV2 内各子状态的 request/layer 一致性。"""
         states = tuple(
             state
             for state in (
@@ -337,6 +354,7 @@ class LayerStateV2:
 
     @property
     def request_id(self):
+        """返回本层状态绑定的 request_id；空状态返回 None。"""
         for state in (self.attention, self.retnet_assist, self.moe, self.xlstm_memory):
             if state is not None:
                 return state.request_id
@@ -344,6 +362,7 @@ class LayerStateV2:
 
     @property
     def layer_index(self):
+        """返回本层状态绑定的 layer_index；空状态返回 None。"""
         for state in (self.attention, self.retnet_assist, self.moe, self.xlstm_memory):
             if state is not None:
                 return state.layer_index
@@ -379,6 +398,7 @@ class LayerStateV2:
         )
 
     def to_dict(self):
+        """按子状态边界序列化整层状态。"""
         return {
             "request_id": self.request_id,
             "layer_index": self.layer_index,

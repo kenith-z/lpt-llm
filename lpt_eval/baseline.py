@@ -50,6 +50,7 @@ class BaselineProfileResult:
     error: str | None = None
 
     def to_dict(self):
+        """序列化单个 profile 的结果，便于 JSON 报告落盘。"""
         return {
             "profile": self.profile,
             "success": self.success,
@@ -89,9 +90,11 @@ class BaselineReport:
 
     @property
     def success(self):
+        """所有 profile 都通过时，整体 baseline 才算成功。"""
         return all(result.success for result in self.results)
 
     def to_dict(self):
+        """生成统一 JSON 报告。"""
         return {
             "report_type": "lpt_v2_baseline",
             "success": self.success,
@@ -106,6 +109,7 @@ class BaselineReport:
         }
 
     def to_markdown(self):
+        """生成便于人工查看的 Markdown 摘要表。"""
         lines = [
             "# LPT v2 Baseline Report",
             "",
@@ -137,6 +141,7 @@ class BaselineReport:
 
 
 def _summarize_states(states):
+    """从 layer states 中抽取 RetNet/xLSTM/MoE 观测指标。"""
     first_state = states[0]
     retnet_token_count = None
     if first_state.retnet_assist is not None:
@@ -181,6 +186,7 @@ def run_lpt_v2_baselines(
             config = build_lpt_v2_profile_config(profile, preset=preset)
             model = LPTV2(vocabulary_size, config).to(device=target_device, dtype=target_dtype)
             model.eval()
+            # baseline 使用确定性 token 输入，只验证 shape、状态与资源路径，不声明质量收益。
             input_ids = build_deterministic_input(
                 vocabulary_size,
                 batch_size,
@@ -194,6 +200,7 @@ def run_lpt_v2_baselines(
                 decode_states = states
                 decode_logits = logits[:, -1:, :]
                 for step in range(int(decode_steps)):
+                    # decode smoke 逐 token 续接，验证 Paged KV 与 Assist state pool 是否可连续更新。
                     next_ids = build_deterministic_input(
                         vocabulary_size,
                         batch_size,

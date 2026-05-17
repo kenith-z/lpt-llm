@@ -1,4 +1,9 @@
-"""LPT v2 request-bound RetNetAssist 状态池。"""
+"""LPT v2 request-bound Assist 状态池。
+
+本文件同时维护 RetNetAssist 与 xLSTMMemory 两类状态池。二者都以 request_id
+为生命周期边界，但不会被 Paged KV 的 page 裁剪、重写或释放连带影响；只有
+prefill/decode 显式更新、preempt 标记、release/reset 才会改变这些辅助状态。
+"""
 
 from __future__ import annotations
 
@@ -36,6 +41,7 @@ SUPPORTED_XLSTM_POOL_PHASES = (
 
 
 def _normalize_request_id(request_id):
+    """统一 request_id 文本形态，防止状态池键出现空字符串。"""
     request_id_text = str(request_id)
     if not request_id_text:
         raise ValueError("request_id 不能为空。")
@@ -58,6 +64,7 @@ class RetNetAssistPoolMetadata:
     updated_at: float = 0.0
 
     def __post_init__(self):
+        """校验 RetNet 状态池阶段和计数，便于 runtime metadata 直接落盘。"""
         object.__setattr__(self, "request_id", _normalize_request_id(self.request_id))
         if self.phase not in SUPPORTED_RETNET_POOL_PHASES:
             raise ValueError(f"未知 RetNetAssist 状态池阶段: {self.phase}")
@@ -70,6 +77,7 @@ class RetNetAssistPoolMetadata:
         object.__setattr__(self, "updated_at", float(self.updated_at))
 
     def to_dict(self):
+        """序列化 RetNet 状态池生命周期指标。"""
         return {
             "request_id": self.request_id,
             "phase": self.phase,
@@ -91,6 +99,7 @@ class RetNetAssistStatePool:
     """
 
     def __init__(self, num_layers, *, layer_to_state_slot=None, state_slot_count=None):
+        """创建 RetNet 状态池，并固定 layer 到 state_slot 的映射。"""
         self.num_layers = int(num_layers)
         if self.num_layers <= 0:
             raise ValueError("num_layers 必须为正整数。")
@@ -112,13 +121,16 @@ class RetNetAssistStatePool:
 
     @property
     def request_count(self):
+        """当前池中有生命周期记录的 request 数量。"""
         return len(self._metadata)
 
     @property
     def state_count(self):
+        """当前池中实际保留的 RetNet state 数量。"""
         return len(self._states)
 
     def _metadata_for(self, request_id):
+        """读取或创建 request 元数据。"""
         request_id = _normalize_request_id(request_id)
         now = time()
         metadata = self._metadata.get(request_id)
@@ -134,6 +146,7 @@ class RetNetAssistStatePool:
         return metadata
 
     def _set_metadata(self, request_id, *, phase, token_count=None, state_count=None, released=False, release_reason=None):
+        """更新 request 生命周期字段，并递增 update_count。"""
         previous = self._metadata_for(request_id)
         now = time()
         metadata = replace(
@@ -168,6 +181,7 @@ class RetNetAssistStatePool:
             expected_slot = self.layer_to_state_slot[layer_index]
             if int(retnet_state.state_slot) != expected_slot:
                 raise ValueError("RetNetAssistState state_slot 与状态池层映射不一致。")
+            # 同一 state_slot 可能服务多个层；池中只保存槽位状态，bind 时再替换 layer_index。
             self._states[(request_id, expected_slot)] = retnet_state
             max_token_count = max(max_token_count, int(retnet_state.token_count))
             state_slots.add(expected_slot)
@@ -180,11 +194,13 @@ class RetNetAssistStatePool:
         )
 
     def get(self, request_id, layer_index):
+        """按 layer_index 获取其映射 state_slot 中的 RetNet 状态。"""
         request_id = _normalize_request_id(request_id)
         layer_index = int(layer_index)
         return self._states.get((request_id, self.layer_to_state_slot[layer_index]))
 
     def get_request_states(self, request_id):
+        """按 state_slot 顺序返回某个 request 的 RetNet 状态。"""
         request_id = _normalize_request_id(request_id)
         return tuple(
             self._states[(request_id, state_slot)]
@@ -215,6 +231,7 @@ class RetNetAssistStatePool:
                 merged_states.append(
                     replace(
                         layer_state,
+                        # 共享状态绑定到具体层时只改 layer_index，summary 张量不复制。
                         retnet_assist=replace(pooled_state, layer_index=layer_index),
                     )
                 )
@@ -271,6 +288,7 @@ class RetNetAssistStatePool:
         )
 
     def to_runtime_metadata(self):
+        """导出状态池元数据，checkpoint 只记录生命周期摘要，不保存状态张量。"""
         return {
             "num_layers": self.num_layers,
             "state_slot_count": self.state_slot_count,
@@ -302,6 +320,7 @@ class xLSTMMemoryPoolMetadata:
     updated_at: float = 0.0
 
     def __post_init__(self):
+        """校验 xLSTM 状态池阶段和累计计数。"""
         object.__setattr__(self, "request_id", _normalize_request_id(self.request_id))
         if self.phase not in SUPPORTED_XLSTM_POOL_PHASES:
             raise ValueError(f"未知 xLSTMMemory 状态池阶段: {self.phase}")
@@ -316,6 +335,7 @@ class xLSTMMemoryPoolMetadata:
         object.__setattr__(self, "updated_at", float(self.updated_at))
 
     def to_dict(self):
+        """序列化 xLSTM 状态池生命周期指标。"""
         return {
             "request_id": self.request_id,
             "phase": self.phase,
@@ -336,6 +356,7 @@ class xLSTMMemoryStatePool:
     """按 request_id 隔离的 xLSTMMemory 状态池。"""
 
     def __init__(self, num_layers):
+        """创建按 request/layer 隔离的 xLSTM 状态池。"""
         self.num_layers = int(num_layers)
         if self.num_layers <= 0:
             raise ValueError("num_layers 必须为正整数。")
@@ -344,13 +365,16 @@ class xLSTMMemoryStatePool:
 
     @property
     def request_count(self):
+        """当前池中有生命周期记录的 request 数量。"""
         return len(self._metadata)
 
     @property
     def state_count(self):
+        """当前池中实际保留的 xLSTM state 数量。"""
         return len(self._states)
 
     def _metadata_for(self, request_id):
+        """读取或创建 xLSTM request 元数据。"""
         request_id = _normalize_request_id(request_id)
         now = time()
         metadata = self._metadata.get(request_id)
@@ -377,6 +401,7 @@ class xLSTMMemoryStatePool:
         released=False,
         release_reason=None,
     ):
+        """更新 xLSTM request 生命周期字段。"""
         previous = self._metadata_for(request_id)
         metadata = replace(
             previous,
@@ -413,6 +438,7 @@ class xLSTMMemoryStatePool:
                 raise ValueError("xLSTMMemoryState request_id 与状态池更新 request_id 不一致。")
             if int(memory_state.layer_index) != layer_index:
                 raise ValueError("xLSTMMemoryState layer_index 与所在层不一致。")
+            # xLSTM 状态粒度当前按启用层独立，不参与 RetNet 的 group/per-layer 共享映射。
             self._states[(request_id, layer_index)] = memory_state
             max_token_count = max(max_token_count, int(memory_state.token_count))
             decay_count = max(decay_count, int(memory_state.decay_count))
@@ -429,10 +455,12 @@ class xLSTMMemoryStatePool:
         )
 
     def get(self, request_id, layer_index):
+        """按 request/layer 获取 xLSTM 状态。"""
         request_id = _normalize_request_id(request_id)
         return self._states.get((request_id, int(layer_index)))
 
     def get_request_states(self, request_id):
+        """按层顺序返回某个 request 的全部 xLSTM 状态。"""
         request_id = _normalize_request_id(request_id)
         return tuple(
             self._states[(request_id, layer_index)]
@@ -512,6 +540,7 @@ class xLSTMMemoryStatePool:
         )
 
     def to_runtime_metadata(self):
+        """导出 xLSTM 状态池元数据，不保存 memory 张量本体。"""
         return {
             "num_layers": self.num_layers,
             "request_count": self.request_count,

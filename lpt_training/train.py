@@ -141,6 +141,7 @@ class TrainingRunConfig:
     tensorboard_dir: Path | None = None
 
     def __post_init__(self):
+        """规范化路径和数值字段，保证训练状态可以稳定序列化与续训。"""
         if self.run_id is None:
             self.run_id = f"{self.training_stage}-{uuid4().hex[:12]}"
         self.artifact_dir = Path(self.artifact_dir)
@@ -220,6 +221,7 @@ def configure_training_runtime(seed=DEFAULT_TRAINING_SEED, *, deterministic=Fals
 
 
 def _checkpoint_file(checkpoint_root, name=MODEL_CHECKPOINT_NAME):
+    """返回 checkpoint 权重文件路径；允许调用方直接传入 .pt 文件。"""
     root = Path(checkpoint_root)
     if root.suffix:
         return root
@@ -227,22 +229,27 @@ def _checkpoint_file(checkpoint_root, name=MODEL_CHECKPOINT_NAME):
 
 
 def _trainer_state_file(checkpoint_root):
+    """返回 trainer_state.json 路径。"""
     return Path(checkpoint_root) / TRAINER_STATE_NAME
 
 
 def _checkpoint_manifest_file(checkpoint_root):
+    """返回 checkpoint_manifest.json 路径。"""
     return Path(checkpoint_root) / CHECKPOINT_MANIFEST_NAME
 
 
 def _checkpoint_payload_name(lora_mode):
+    """根据是否 LoRA 训练选择主 payload 文件名。"""
     return LORA_ADAPTER_CHECKPOINT_NAME if lora_mode else MODEL_CHECKPOINT_NAME
 
 
 def _load_json_file(path):
+    """以 UTF-8 读取 JSON 文件。"""
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def _training_state_flag(state, key, default):
+    """从 trainer_state 或内嵌 training_config 中读取布尔开关。"""
     if key in state:
         return bool(state[key])
     training_config = state.get("training_config")
@@ -252,10 +259,12 @@ def _training_state_flag(state, key, default):
 
 
 def _has_readable_torch_file(path):
+    """检查 torch 保存文件是否可读，避免半写入文件被当作可续训。"""
     return is_torch_save_file_readable(path)
 
 
 def _checkpoint_file_entries_are_valid(root, file_entries, required_names):
+    """校验 manifest 中记录的文件是否存在且大小一致。"""
     entries_by_name = {}
     for entry in file_entries:
         if not isinstance(entry, dict):
@@ -277,6 +286,7 @@ def _checkpoint_file_entries_are_valid(root, file_entries, required_names):
 
 
 def _required_checkpoint_files(lora_mode, state, *, require_optimizer):
+    """根据训练模式和保存开关推导必须存在的 checkpoint 文件。"""
     required_names = {
         _checkpoint_payload_name(lora_mode),
         TRAINER_STATE_NAME,
@@ -289,6 +299,7 @@ def _required_checkpoint_files(lora_mode, state, *, require_optimizer):
 
 
 def _checkpoint_manifest_is_valid(root, *, lora_mode, require_optimizer):
+    """按 v2 training checkpoint manifest 校验目录完整性。"""
     manifest_path = _checkpoint_manifest_file(root)
     try:
         manifest = _load_json_file(manifest_path)
@@ -317,6 +328,7 @@ def _checkpoint_manifest_is_valid(root, *, lora_mode, require_optimizer):
     required_names = _required_checkpoint_files(lora_mode, state, require_optimizer=require_optimizer)
     if not _checkpoint_file_entries_are_valid(root, manifest.get("files", ()), required_names):
         return False
+    # manifest 文件大小校验只能发现缺失/截断，torch.load 可读性校验可额外发现损坏的二进制。
     torch_files = [root / _checkpoint_payload_name(lora_mode)]
     if require_optimizer:
         torch_files.append(root / OPTIMIZER_CHECKPOINT_NAME)
@@ -326,6 +338,7 @@ def _checkpoint_manifest_is_valid(root, *, lora_mode, require_optimizer):
 
 
 def _legacy_checkpoint_is_valid(root, *, lora_mode, require_optimizer):
+    """兼容早期无 manifest 的同分支训练目录，仅用于本项目 v2 训练续跑。"""
     model_or_adapter = root / _checkpoint_payload_name(lora_mode)
     trainer_state_path = _trainer_state_file(root)
     if not root.is_dir() or not trainer_state_path.is_file():
@@ -349,6 +362,7 @@ def _legacy_checkpoint_is_valid(root, *, lora_mode, require_optimizer):
 
 
 def _is_valid_training_checkpoint_root(checkpoint_root, *, lora_mode=False, require_optimizer=True):
+    """统一判断 checkpoint 根目录是否满足续训要求。"""
     root = Path(checkpoint_root)
     if _checkpoint_manifest_file(root).is_file():
         return _checkpoint_manifest_is_valid(root, lora_mode=lora_mode, require_optimizer=require_optimizer)
@@ -365,6 +379,7 @@ def has_complete_training_state(checkpoint_root, *, lora_mode=False):
 
 
 def _parse_step_checkpoint_index(path):
+    """从 step_000123 目录名中解析 step 编号。"""
     name = Path(path).name
     if not name.startswith("step_"):
         return -1
@@ -375,6 +390,7 @@ def _parse_step_checkpoint_index(path):
 
 
 def _iter_resume_checkpoint_candidates(checkpoint_root):
+    """按 latest、latest_previous、step_* 的优先级枚举续训候选。"""
     root = Path(checkpoint_root)
     candidates = [root, root.with_name(f"{root.name}_previous")]
     step_roots = sorted(
@@ -413,12 +429,14 @@ def load_trainer_state(checkpoint_root):
 
 
 def _iter_trainable_parameters(model):
+    """迭代当前需要优化的参数，LoRA 模式下只会返回未冻结参数。"""
     for parameter_name, parameter in model.named_parameters():
         if parameter.requires_grad:
             yield parameter_name, parameter
 
 
 def _parameter_group_summary(parameter_group):
+    """生成 optimizer 参数组摘要，写入 trainer_state 方便审计。"""
     return {
         "parameter_count": len(parameter_group),
         "element_count": int(sum(parameter.numel() for parameter in parameter_group)),
@@ -426,6 +444,7 @@ def _parameter_group_summary(parameter_group):
 
 
 def _build_optimizer(model, *, learning_rate, weight_decay):
+    """构造 AdamW，并按 norm/bias 与低维参数拆分 weight decay。"""
     decay_parameters = []
     no_decay_parameters = []
     for parameter_name, parameter in _iter_trainable_parameters(model):
@@ -451,6 +470,7 @@ def _build_optimizer(model, *, learning_rate, weight_decay):
 
 
 def _linear_warmup_cosine_lambda(current_step, *, warmup_steps, total_steps):
+    """线性 warmup 后接 cosine decay 的 LR multiplier。"""
     if warmup_steps > 0 and current_step < warmup_steps:
         return float(current_step + 1) / float(max(1, warmup_steps))
     progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
@@ -459,6 +479,7 @@ def _linear_warmup_cosine_lambda(current_step, *, warmup_steps, total_steps):
 
 
 def _build_scheduler(optimizer, *, total_steps, warmup_ratio):
+    """构造训练 scheduler；未知总步数时保持常数学习率。"""
     if total_steps is None:
         return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _step: 1.0)
     total_steps = max(1, int(total_steps))
@@ -477,6 +498,7 @@ def _build_scheduler(optimizer, *, total_steps, warmup_ratio):
 
 
 def _resolve_batch_max_sequence_length(config, rng=None):
+    """决定当前 batch 的最大长度，支持 LongRoPE2 混合窗口采样。"""
     if not config.longrope2_window_lengths:
         return config.max_sequence_length or GlobalConfig.train_max_sequence_length
 
@@ -485,6 +507,7 @@ def _resolve_batch_max_sequence_length(config, rng=None):
         selected_length = max(lengths)
     else:
         weights = config.longrope2_window_weights
+        # 每个 batch 采样一个窗口长度，用来覆盖 original/target/long window 混合训练策略。
         selected_length = rng.choices(lengths, weights=weights, k=1)[0]
 
     if config.max_sequence_length is not None:
@@ -493,6 +516,7 @@ def _resolve_batch_max_sequence_length(config, rng=None):
 
 
 def _batch_iterator(dataset, *, batch_size, epochs, max_steps=None):
+    """把任意可迭代 dataset 组织为按样本数计的 batch 迭代器。"""
     max_steps = None if max_steps is None else int(max_steps)
     if max_steps is not None and max_steps <= 0:
         return
@@ -516,6 +540,7 @@ def _batch_iterator(dataset, *, batch_size, epochs, max_steps=None):
 
 
 def _estimate_dataset_batches(dataset, config):
+    """在 dataset 支持 len() 时估算完整训练批次数。"""
     try:
         dataset_size = len(dataset)
     except TypeError:
@@ -529,6 +554,7 @@ def _estimate_dataset_batches(dataset, config):
 
 
 def _resolve_training_batch_budget(dataset, config):
+    """合并 dataset 大小和 max_steps，得到本次训练最多处理的 batch 数。"""
     dataset_batches = _estimate_dataset_batches(dataset, config)
     if config.max_steps is None:
         return dataset_batches
@@ -538,14 +564,17 @@ def _resolve_training_batch_budget(dataset, config):
 
 
 def _resolve_remaining_batch_budget(total_batch_budget, global_step):
+    """根据已完成 global_step 计算 resume 后剩余 batch 数。"""
     if total_batch_budget is None:
         return None
     return max(0, int(total_batch_budget) - int(global_step))
 
 
 def _build_batch_tensors(samples, tokenizer, config, rng=None):
+    """从结构化样本构造模型训练 batch 张量。"""
     max_length = _resolve_batch_max_sequence_length(config, rng=rng)
     if config.sequence_packing:
+        # packing 路径额外返回 position_ids/segment_ids，模型侧用 segment_ids 阻断跨样本注意力。
         input_ids, labels, attention_mask, position_ids, segment_ids, sample_count = build_packed_training_batch(
             samples,
             tokenizer,
@@ -575,6 +604,7 @@ def _build_batch_tensors(samples, tokenizer, config, rng=None):
 
 
 def _move_batch(batch, device):
+    """把 batch 内 tensor 移动到目标设备，非 tensor 元数据保持原样。"""
     moved = {}
     for key, value in batch.items():
         moved[key] = value.to(device) if isinstance(value, torch.Tensor) else value
@@ -582,6 +612,7 @@ def _move_batch(batch, device):
 
 
 def _compute_lm_loss(logits, labels, *, chunk_tokens=LM_LOSS_CHUNK_TOKENS):
+    """计算自回归 LM loss，并分块降低大 vocab 下的峰值显存。"""
     shift_logits = logits[:, :-1, :]
     shift_labels = labels[:, 1:]
     valid_target_count = int((shift_labels != -100).sum().item())
@@ -599,6 +630,7 @@ def _compute_lm_loss(logits, labels, *, chunk_tokens=LM_LOSS_CHUNK_TOKENS):
             chunk_valid_count = int((chunk_labels != -100).sum().item())
             if chunk_valid_count == 0:
                 continue
+            # reduction="sum" 后统一除以有效 target 数，避免不同 chunk 有效 token 数不等导致加权偏差。
             chunk_logits = batch_logits[start:end]
             chunk_loss = F.cross_entropy(
                 chunk_logits.float(),
@@ -611,6 +643,7 @@ def _compute_lm_loss(logits, labels, *, chunk_tokens=LM_LOSS_CHUNK_TOKENS):
 
 
 def _forward_batch(model, batch):
+    """训练前向入口：明确关闭 KV cache，避免训练 K/V 写入 Paged KV 页池。"""
     return model(
         batch["input_ids"],
         attention_mask=batch["attention_mask"],
@@ -623,6 +656,7 @@ def _forward_batch(model, batch):
 
 
 def _autocast_enabled(device):
+    """判断当前设备和全局 dtype 是否允许 autocast。"""
     return device.type == "cuda" and GlobalConfig.autocast_dtype in {
         torch.float16,
         torch.bfloat16,
@@ -630,6 +664,7 @@ def _autocast_enabled(device):
 
 
 def _compute_grad_norm(parameters):
+    """手动计算 L2 grad norm，供不裁剪梯度时记录指标。"""
     total = 0.0
     for parameter in parameters:
         if parameter.grad is None:
@@ -640,12 +675,14 @@ def _compute_grad_norm(parameters):
 
 
 def _reset_cuda_peak_memory_stats(device):
+    """重置 CUDA peak memory 计数，CPU 训练时为空操作。"""
     if device.type != "cuda":
         return
     torch.cuda.reset_peak_memory_stats(device)
 
 
 def _collect_cuda_memory_metrics(device):
+    """采集训练资源指标，定位长样本或大 vocab loss 导致的显存峰值。"""
     if device.type != "cuda":
         return {}
     to_mib = 1024 * 1024
@@ -658,6 +695,7 @@ def _collect_cuda_memory_metrics(device):
 
 @torch.no_grad()
 def _evaluate_model(model, tokenizer, eval_dataset, config, device):
+    """周期性验证，复用训练 batch 构造逻辑但不更新权重。"""
     if eval_dataset is None:
         return None
     was_training = model.training
@@ -675,6 +713,7 @@ def _evaluate_model(model, tokenizer, eval_dataset, config, device):
         ),
         start=1,
     ):
+        # eval 使用相同 sequence packing 和 LongRoPE2 最大长度配置，确保验证口径接近训练。
         batch = _move_batch(_build_batch_tensors(samples, tokenizer, config), device)
         with torch.autocast(
             device_type=device.type,
@@ -702,6 +741,7 @@ def _evaluate_model(model, tokenizer, eval_dataset, config, device):
 
 
 def _write_metrics(artifact_dir, metric):
+    """把指标追加写入 metrics.jsonl。"""
     metric_path = Path(artifact_dir) / METRICS_JSONL_NAME
     metric_path.parent.mkdir(parents=True, exist_ok=True)
     with metric_path.open("a", encoding="utf-8") as metrics_file:
@@ -709,20 +749,24 @@ def _write_metrics(artifact_dir, metric):
 
 
 def _display_metric_name(key):
+    """把内部指标名转换为控制台展示名。"""
     return METRIC_DISPLAY_NAMES.get(str(key), f"{key}({key})")
 
 
 def _display_phase_name(namespace):
+    """把指标 namespace 转成中文阶段名。"""
     return PHASE_DISPLAY_NAMES.get(str(namespace), f"{namespace}({namespace})")
 
 
 def _format_metric_value(value):
+    """统一控制台指标值格式。"""
     if isinstance(value, float):
         return f"{value:.6g}"
     return str(value)
 
 
 def _print_metric_record(namespace, metric):
+    """按稳定字段顺序输出训练/验证指标。"""
     ordered_keys = [
         "stage",
         "global_step",
@@ -755,6 +799,7 @@ def _print_metric_record(namespace, metric):
 
 
 def _build_tensorboard_writer(config):
+    """按配置创建 TensorBoard writer；依赖缺失或初始化失败时自动降级。"""
     if not config.tensorboard_enabled:
         return None
     if SummaryWriter is None:
@@ -771,6 +816,7 @@ class _SafeTensorBoardWriter:
     """隔离 TensorBoard 异步写入失败，避免辅助日志中断训练。"""
 
     def __init__(self, log_dir):
+        """延迟持有真实 SummaryWriter，并记录失败状态。"""
         self.log_dir = Path(log_dir)
         self.disabled = False
         self._warning_emitted = False
@@ -778,16 +824,19 @@ class _SafeTensorBoardWriter:
         self._open_writer()
 
     def _open_writer(self):
+        """创建真实 SummaryWriter。"""
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._writer = SummaryWriter(log_dir=str(self.log_dir), max_queue=1)
 
     def _warn_once(self, exc):
+        """TensorBoard 失败只提示一次，避免训练日志被刷屏。"""
         if self._warning_emitted:
             return
         tqdm.write(f"警告: TensorBoard 写入失败，已关闭 TensorBoard 输出: {exc}")
         self._warning_emitted = True
 
     def _close_writer(self):
+        """关闭底层 writer，忽略辅助日志清理异常。"""
         if self._writer is None:
             return
         try:
@@ -797,11 +846,13 @@ class _SafeTensorBoardWriter:
         self._writer = None
 
     def _disable(self, exc):
+        """关闭 TensorBoard 输出，但不中断训练主流程。"""
         self.disabled = True
         self._warn_once(exc)
         self._close_writer()
 
     def add_scalar(self, tag, value, step):
+        """写入单个 scalar；失败时自动降级为禁用状态。"""
         if self.disabled:
             return
         try:
@@ -813,6 +864,7 @@ class _SafeTensorBoardWriter:
             self._disable(exc)
 
     def flush(self):
+        """刷新 TensorBoard 缓冲区。"""
         if self.disabled or self._writer is None:
             return
         try:
@@ -822,10 +874,12 @@ class _SafeTensorBoardWriter:
             self._disable(exc)
 
     def close(self):
+        """关闭 TensorBoard writer。"""
         self._close_writer()
 
 
 def _disable_tensorboard_writer(writer, exc):
+    """兼容安全 writer 和原始 writer 的禁用逻辑。"""
     if hasattr(writer, "_disable"):
         writer._disable(exc)
         return
@@ -833,6 +887,7 @@ def _disable_tensorboard_writer(writer, exc):
 
 
 def _write_tensorboard_metrics(writer, namespace, metric):
+    """把数值型指标写入 TensorBoard。"""
     if writer is None:
         return
     step = int(metric.get("global_step", 0))
@@ -848,18 +903,21 @@ def _write_tensorboard_metrics(writer, namespace, metric):
 
 
 def _write_metric_outputs(config, namespace, metric, writer):
+    """同时写 JSONL、控制台和 TensorBoard。"""
     _write_metrics(config.artifact_dir, metric)
     _print_metric_record(namespace, metric)
     _write_tensorboard_metrics(writer, namespace, metric)
 
 
 def _save_trainer_state(checkpoint_root, state):
+    """保存 trainer_state.json，记录可续训元数据。"""
     state_path = _trainer_state_file(checkpoint_root)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(state_path, json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _build_checkpoint_manifest(checkpoint_root, config, trainer_state, file_names):
+    """构造 checkpoint_manifest，用于发布前后完整性校验。"""
     return {
         "checkpoint_format": TRAINING_CHECKPOINT_FORMAT,
         "checkpoint_schema_version": TRAINING_CHECKPOINT_SCHEMA_VERSION,
@@ -878,22 +936,26 @@ def _build_checkpoint_manifest(checkpoint_root, config, trainer_state, file_name
 
 
 def _save_checkpoint_manifest(checkpoint_root, config, trainer_state, file_names):
+    """保存 checkpoint manifest。"""
     manifest_path = _checkpoint_manifest_file(checkpoint_root)
     manifest = _build_checkpoint_manifest(checkpoint_root, config, trainer_state, file_names)
     atomic_write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _staging_checkpoint_root(checkpoint_root):
+    """生成 checkpoint 暂存目录，发布成功前不覆盖正式目录。"""
     checkpoint_root = Path(checkpoint_root)
     return checkpoint_root.with_name(f"{checkpoint_root.name}.staging.{uuid4().hex}")
 
 
 def _checkpoint_previous_root(checkpoint_root):
+    """返回 latest 轮转备份目录。"""
     checkpoint_root = Path(checkpoint_root)
     return checkpoint_root.with_name(f"{checkpoint_root.name}_previous")
 
 
 def _remove_path(path):
+    """删除文件或目录；仅用于 checkpoint 暂存/轮转路径。"""
     path = Path(path)
     if path.is_dir():
         shutil.rmtree(path)
@@ -902,12 +964,14 @@ def _remove_path(path):
 
 
 def _publish_checkpoint_root(staging_root, target_root, *, rotate_existing):
+    """把暂存 checkpoint 原子发布到目标目录。"""
     staging_root = Path(staging_root)
     target_root = Path(target_root)
     target_root.parent.mkdir(parents=True, exist_ok=True)
     if rotate_existing and target_root.exists():
         previous_root = _checkpoint_previous_root(target_root)
         _remove_path(previous_root)
+        # latest 目录先轮转成 latest_previous，当前 latest 校验通过后再整体 rename 进来。
         target_root.rename(previous_root)
     elif target_root.exists():
         raise FileExistsError(f"目标 checkpoint 已存在: {target_root}")
@@ -915,6 +979,7 @@ def _publish_checkpoint_root(staging_root, target_root, *, rotate_existing):
 
 
 def _cleanup_checkpoint_root(path):
+    """保存失败时清理暂存目录；清理异常不遮盖原始错误。"""
     try:
         _remove_path(path)
     except OSError:
@@ -922,6 +987,7 @@ def _cleanup_checkpoint_root(path):
 
 
 def _save_checkpoint(model, optimizer, scheduler, config, trainer_state, *, is_latest=True, checkpoint_root=None):
+    """保存训练 checkpoint，并在暂存目录校验通过后发布。"""
     checkpoint_root = Path(config.checkpoint_dir) if checkpoint_root is None else Path(checkpoint_root)
     if not is_latest:
         checkpoint_root = checkpoint_root.parent / f"step_{trainer_state['global_step']:06d}"
@@ -930,6 +996,7 @@ def _save_checkpoint(model, optimizer, scheduler, config, trainer_state, *, is_l
     try:
         file_names = []
         if config.lora_mode:
+            # LoRA 训练只保存 adapter 权重；base 模型由训练入口的 initial checkpoint 绑定。
             save_lora_adapter_state(
                 model,
                 staging_root / LORA_ADAPTER_CHECKPOINT_NAME,
@@ -937,6 +1004,7 @@ def _save_checkpoint(model, optimizer, scheduler, config, trainer_state, *, is_l
             )
             file_names.append(LORA_ADAPTER_CHECKPOINT_NAME)
         else:
+            # 非 LoRA 路径保存完整 v2 checkpoint，包含严格 schema 与完整 ModelConfig 快照。
             save_lpt_v2_checkpoint(
                 model,
                 staging_root / MODEL_CHECKPOINT_NAME,
@@ -958,6 +1026,7 @@ def _save_checkpoint(model, optimizer, scheduler, config, trainer_state, *, is_l
             require_optimizer=bool(config.save_optimizer),
         ):
             raise RuntimeError(f"暂存 checkpoint 校验失败: {staging_root}")
+        # 只有暂存目录自校验通过，才发布为 latest/step，避免中断进程留下半成品。
         _publish_checkpoint_root(staging_root, checkpoint_root, rotate_existing=bool(is_latest))
         model.config.save_json(Path(config.artifact_dir) / "config" / "model_config.json")
         return checkpoint_root
@@ -967,12 +1036,14 @@ def _save_checkpoint(model, optimizer, scheduler, config, trainer_state, *, is_l
 
 
 def _best_checkpoint_root(config):
+    """返回 best checkpoint 目录。"""
     if config.best_checkpoint_dir is not None:
         return Path(config.best_checkpoint_dir)
     return Path(config.checkpoint_dir).parent / "best_loss"
 
 
 def _extract_best_metric_value(config, trainer_state):
+    """从 trainer_state 中读取用于 best checkpoint 判断的指标。"""
     if str(config.best_checkpoint_metric) == "loss":
         value = trainer_state.get("last_loss")
     elif str(config.best_checkpoint_metric) == "eval_loss":
@@ -985,6 +1056,7 @@ def _extract_best_metric_value(config, trainer_state):
 
 
 def _is_better_checkpoint_metric(current_value, best_value, *, min_delta):
+    """判断当前指标是否达到更优 checkpoint 标准。"""
     if current_value is None:
         return False
     if best_value is None:
@@ -993,6 +1065,7 @@ def _is_better_checkpoint_metric(current_value, best_value, *, min_delta):
 
 
 def _attach_best_checkpoint_state(config, trainer_state, *, best_value, best_global_step):
+    """把当前 best checkpoint 摘要写回 trainer_state。"""
     if best_value is None:
         trainer_state["best_checkpoint"] = None
         return trainer_state
@@ -1007,6 +1080,7 @@ def _attach_best_checkpoint_state(config, trainer_state, *, best_value, best_glo
 
 
 def _save_inference_weight(model, config, trainer_state):
+    """保存推理加载用权重；完整 checkpoint 作为旁路审计产物一并保存。"""
     if config.lora_mode:
         return save_lora_adapter_state(
             model,
@@ -1025,6 +1099,7 @@ def _save_inference_weight(model, config, trainer_state):
 
 
 def _serialize_training_config(config):
+    """把 TrainingRunConfig 转成 JSON 友好的字典。"""
     return {
         key: (str(value) if isinstance(value, Path) else value)
         for key, value in asdict(config).items()
@@ -1032,6 +1107,7 @@ def _serialize_training_config(config):
 
 
 def _build_longrope2_training_strategy(config):
+    """提取本次训练实际使用的 LongRoPE2 窗口策略。"""
     return {
         "max_sequence_length": config.max_sequence_length,
         "window_lengths": None if config.longrope2_window_lengths is None else list(config.longrope2_window_lengths),
@@ -1052,6 +1128,7 @@ def _build_trainer_state(
     last_eval_metric=None,
     optimizer_group_summary=None,
 ):
+    """生成 trainer_state，覆盖续训、报告和 checkpoint metadata 需要的字段。"""
     latest_eval_loss = None
     latest_eval_ppl = None
     if last_eval_metric is not None:
@@ -1090,6 +1167,7 @@ def _build_trainer_state(
 
 
 def _load_optimizer_scheduler_state(checkpoint_root, optimizer, scheduler):
+    """从 checkpoint 目录恢复 optimizer/scheduler 状态。"""
     root = Path(checkpoint_root)
     optimizer_path = root / OPTIMIZER_CHECKPOINT_NAME
     if optimizer_path.exists():
@@ -1141,6 +1219,7 @@ def train(
         config.resume_checkpoint,
         lora_mode=config.lora_mode,
     ):
+        # resume 只在完整训练状态存在时启用；缺 optimizer 的目录不会被当作可续训来源。
         state = load_trainer_state(config.resume_checkpoint)
         global_step = int(state.get("global_step", 0))
         optimizer_step = int(state.get("optimizer_step", 0))
@@ -1190,6 +1269,7 @@ def train(
                 logits, _states = _forward_batch(model, batch)
                 loss, valid_targets = _compute_lm_loss(logits, batch["labels"])
             if loss is None:
+                # 极端截断或模板异常可能让 batch 没有监督 token，此时跳过该 batch。
                 continue
             scaled_loss = loss / int(config.gradient_accumulation_steps)
             scaled_loss.backward()
@@ -1296,6 +1376,7 @@ def train(
                 )
             )
             if should_check_best:
+                # best checkpoint 与 latest/step 保存解耦：只有指标真的变优才额外发布 best 目录。
                 best_metric_value = _extract_best_metric_value(config, trainer_state)
                 if _is_better_checkpoint_metric(
                     best_metric_value,
@@ -1331,6 +1412,7 @@ def train(
                 _save_checkpoint(model, optimizer, scheduler, config, trainer_state, is_latest=True)
 
         if accumulated_steps > 0:
+            # 数据集尾部不足一个 gradient_accumulation_steps 时，也要把残余梯度提交一次。
             trainable_parameters = [
                 parameter for _, parameter in _iter_trainable_parameters(model)
             ]

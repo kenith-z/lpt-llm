@@ -1,5 +1,13 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
+"""LongRoPE 官方 rotary 组件的本地封装。
+
+本文件保留原始 LongRoPE 实现的核心公式，供 `position_encoding.py` 适配到
+LPT v2 的 LongRoPE2 训练/推理策略。项目侧新增注释只解释接入边界：
+- LPT 路径使用显式 position_ids，兼容 sequence packing。
+- dynamic/mixed 类只影响 RoPE 频率表，不修改 checkpoint 权重。
+"""
+
 import math
 import torch
 import transformers
@@ -35,6 +43,7 @@ class LongRoPEScaledRotaryEmbedding(torch.nn.Module):
         mscale_factors=None,
         device=None,
     ):
+        """初始化 LongRoPE 频率缩放表与 magnitude scaling。"""
         super().__init__()
 
         self.dim = dim
@@ -66,22 +75,26 @@ class LongRoPEScaledRotaryEmbedding(torch.nn.Module):
             raise ValueError(f"Unsupported model type for LongRoPE: {model_type}")
 
     def _calc_mscale_su(self, scale):
+        """SU 策略的 attention magnitude scaling。"""
         if scale <= 1.0:
             return 1.0
         return math.sqrt(1 + math.log(scale) / math.log(self.original_max_position_embeddings))
 
     def _calc_mscale_yarn(self, scale):
+        """YaRN 策略的 attention magnitude scaling。"""
         if scale <= 1.0:
             return 1.0
         return 0.1 * math.log(scale) + 1.0
 
     def _calc_inv_freq(self, seq_len, device):
+        """按 rescale_factors 计算 RoPE 反频率。"""
         rescale_factors = self.rescale_factors.to(device)
         exponent = torch.arange(0, self.dim, 2, dtype=GlobalConfig.parameter_dtype, device=device) / self.dim
         return 1.0 / (rescale_factors * (self.base ** exponent))
 
     @torch.no_grad()
     def _forward_mistral(self, x, seq_len=None):
+        """兼容 Mistral 形态的 RoPE cos/sin 生成。"""
         seq_len = x.shape[-2] if seq_len is None else seq_len
         t = torch.arange(seq_len, device=x.device, dtype=GlobalConfig.parameter_dtype)
         inv_freq = self.inv_freq.to(x.device)
@@ -91,6 +104,7 @@ class LongRoPEScaledRotaryEmbedding(torch.nn.Module):
 
     @torch.no_grad()
     def _forward_LPT(self, x, position_ids, seq_len=None):
+        """LPT 路径：使用显式 position_ids 生成 cos/sin。"""
         seq_len = x.shape[-2] if seq_len is None else seq_len
         inv_freq = self._calc_inv_freq(seq_len, x.device)
         inv_freq_expanded = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
@@ -109,8 +123,10 @@ class LongRoPEScaledRotaryEmbedding(torch.nn.Module):
 
 
 class DynamicLongRoPEScaledRotaryEmbedding(LongRoPEScaledRotaryEmbedding):
+    """随当前序列长度动态插值 rescale_factors 的 LongRoPE。"""
 
     def _calc_inv_freq(self, seq_len, device):
+        """基于当前 seq_len 计算动态缩放后的反频率。"""
         rescale_factors = self.rescale_factors.to(device)
         current_scale = seq_len / self.original_max_position_embeddings
         original_scale = self.max_position_embeddings / self.original_max_position_embeddings
@@ -121,6 +137,7 @@ class DynamicLongRoPEScaledRotaryEmbedding(LongRoPEScaledRotaryEmbedding):
 
 
 class MixedLongRoPEScaledRotaryEmbedding(LongRoPEScaledRotaryEmbedding):
+    """原始窗口内保留原始 RoPE、窗口外使用 LongRoPE 的混合 embedding。"""
 
     def __init__(
         self,
@@ -136,6 +153,7 @@ class MixedLongRoPEScaledRotaryEmbedding(LongRoPEScaledRotaryEmbedding):
         model_type="LPT",
         device=None,
     ):
+        """保存原始窗口 embedding，并初始化长窗口 embedding。"""
         self.start_token_idx = start_token_idx
         self.original_embeddings = tuple(x.to(device) for x in original_embeddings)
         super().__init__(
@@ -153,6 +171,7 @@ class MixedLongRoPEScaledRotaryEmbedding(LongRoPEScaledRotaryEmbedding):
         self.forward = lambda *inputs: self._add_original_embeddings(*self._longrope_forward(*inputs))
 
     def _add_original_embeddings(self, emb_cos, emb_sin):
+        """把原始窗口的 cos/sin 复制回混合结果。"""
         if self.start_token_idx > 0:
             assert self.original_embeddings is not None, \
                 'need input original embeddings for start token index > 0'

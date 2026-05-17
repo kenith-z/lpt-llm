@@ -34,9 +34,11 @@ class ForwardSmokeReport:
 
     @property
     def success(self):
+        """forward_ok 是只读 smoke 的唯一成功判定。"""
         return bool(self.metrics.get("forward_ok"))
 
     def to_dict(self):
+        """生成 forward smoke JSON 载荷。"""
         return {
             "report_type": "lpt_v2_forward_smoke",
             "checkpoint_path": self.checkpoint_path,
@@ -49,6 +51,7 @@ class ForwardSmokeReport:
         }
 
     def to_markdown(self):
+        """生成 forward smoke Markdown 报告。"""
         metrics = self.metrics
         lines = [
             "# LPT v2 Forward Smoke",
@@ -92,6 +95,7 @@ class ForwardSmokeReport:
 
 
 def _count_layer_states(layer_states):
+    """统计 LayerStateV2 中 Attention、RetNet、xLSTM 的实际数量。"""
     attention_state_count = 0
     retnet_state_slots = set()
     retnet_layer_state_count = 0
@@ -108,11 +112,13 @@ def _count_layer_states(layer_states):
 
 
 def _mean_optional(values):
+    """跳过 None 后求均值，没有有效值时返回 0。"""
     values = [float(value) for value in values if value is not None]
     return 0.0 if not values else sum(values) / len(values)
 
 
 def _retnet_observability(layer_states):
+    """汇总 RetNet adapter 观测指标。"""
     summary_norms = []
     q_delta_norms = []
     k_delta_norms = []
@@ -171,6 +177,7 @@ def run_lpt_v2_forward_smoke_report(
     )
 
     with torch.inference_mode():
+        # 只读 smoke 不更新 optimizer；use_kv_cache 可覆盖训练/推理两种前向边界。
         logits, layer_states = model(
             input_ids,
             rope_cache_scope="inference",

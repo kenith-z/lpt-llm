@@ -11,12 +11,14 @@ import torch
 
 
 def _temporary_sibling_path(target_path):
+    """在目标文件同目录生成临时路径，保证 replace 不跨文件系统。"""
     target_path = Path(target_path)
     suffix = f".tmp.{uuid4().hex}"
     return target_path.with_name(f"{target_path.name}{suffix}")
 
 
 def _cleanup_file(path):
+    """尽力清理临时文件，清理失败不遮盖原始写入异常。"""
     path = Path(path)
     try:
         if path.exists():
@@ -26,6 +28,7 @@ def _cleanup_file(path):
 
 
 def _ensure_non_empty(path):
+    """确保写入结果存在且非空。"""
     path = Path(path)
     if not path.is_file() or path.stat().st_size <= 0:
         raise OSError(f"文件写入结果为空: {path}")
@@ -41,6 +44,7 @@ def atomic_torch_save(payload, path, *, retries=1):
         try:
             torch.save(payload, temp_path)
             _ensure_non_empty(temp_path)
+            # 同目录 replace 在 Windows/Linux 上都比直接写目标文件更抗中断。
             temp_path.replace(target_path)
             return target_path
         except Exception as exc:

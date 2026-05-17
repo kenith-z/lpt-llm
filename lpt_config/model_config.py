@@ -156,6 +156,7 @@ LPT_V2_MODEL_SIZE_PRESETS = {
         "attention_window_size": 4096,
     },
 }
+# 默认 preset 展开后的尺寸字段；ModelConfig 字段默认值直接读取这里，保证默认构造与 preset 表一致。
 DEFAULT_MODEL_SIZE_PRESET_VALUES = LPT_V2_MODEL_SIZE_PRESETS[DEFAULT_MODEL_SIZE_PRESET]
 
 
@@ -466,6 +467,7 @@ class ModelConfig:
     longrope2_mixed_original_window: int | None = None
 
     def __post_init__(self):
+        """规范化字段类型并执行 v2-only 语义校验。"""
         object.__setattr__(self, "model_size_preset", str(self.model_size_preset))
         object.__setattr__(self, "default_model_size_preset", str(self.default_model_size_preset))
         object.__setattr__(self, "parameter_count_policy", str(self.parameter_count_policy))
@@ -661,6 +663,7 @@ class ModelConfig:
 
         inferred_hidden_size = self.num_heads * self.head_dim
         if self.hidden_size is None:
+            # v2 只允许 hidden_size 由 attention 头配置唯一确定，避免 checkpoint 恢复时出现歧义。
             object.__setattr__(self, "hidden_size", inferred_hidden_size)
         else:
             normalized_hidden_size = int(self.hidden_size)
@@ -714,6 +717,7 @@ class ModelConfig:
             )
 
         if self.longrope2_factor_max_sequence_length is not None:
+            # 该字段记录 factors 生成时覆盖的最大长度，不隐式修改训练或推理截断长度。
             factor_max_sequence_length = int(self.longrope2_factor_max_sequence_length)
             if factor_max_sequence_length <= 0:
                 raise ValueError("longrope2_factor_max_sequence_length 必须为正整数或 None。")

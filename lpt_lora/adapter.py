@@ -32,6 +32,7 @@ class LoRAConfig:
     target_modules: tuple[str, ...] = DEFAULT_LORA_TARGET_MODULES
 
     def __post_init__(self):
+        """校验 LoRA 超参，并把 target_modules 固定为 tuple。"""
         if int(self.rank) <= 0:
             raise ValueError("LoRA rank 必须为正整数。")
         if float(self.alpha) <= 0:
@@ -74,6 +75,7 @@ class LowRankLinearAdapter(nn.Module):
         alpha=DEFAULT_LORA_ALPHA,
         dropout_p=DEFAULT_LORA_DROPOUT,
     ):
+        """包装原线性层；base_layer 冻结，只训练低秩分支。"""
         super().__init__()
         if not isinstance(source_linear, nn.Linear):
             raise TypeError("source_linear 必须是 nn.Linear。")
@@ -95,6 +97,7 @@ class LowRankLinearAdapter(nn.Module):
 
 
 def _replace_linear_layer(parent_module, attribute_name, config):
+    """把父模块中的指定 Linear 替换为 LowRankLinearAdapter。"""
     source_layer = getattr(parent_module, attribute_name)
     if isinstance(source_layer, LowRankLinearAdapter):
         return
@@ -111,6 +114,7 @@ def _replace_linear_layer(parent_module, attribute_name, config):
 
 
 def _iter_attention_mixers(model):
+    """遍历 LPTV2 中可注入 LoRA 的 attention mixer。"""
     for module in model.modules():
         if isinstance(module, LocalAttentionMixerV2):
             yield module
@@ -128,6 +132,7 @@ def attach_lora_adapters(model, config=None):
             replaced_count += 1
 
     for parameter_name, parameter in model.named_parameters():
+        # 只解冻 LoRA 新增的上下投影权重，冻结基座模型，保证 adapter-only checkpoint 语义清晰。
         parameter.requires_grad = (
             parameter_name.endswith("down_projection.weight")
             or parameter_name.endswith("up_projection.weight")
@@ -167,6 +172,7 @@ def save_lora_adapter_state(model, path, *, config=None, extra_metadata=None):
 
 
 def _load_lora_adapter_payload(path):
+    """读取并校验 adapter-only checkpoint 外层 schema。"""
     payload = torch.load(Path(path), map_location="cpu", weights_only=False)
     if payload.get("adapter_format") != LORA_ADAPTER_FORMAT:
         raise ValueError("adapter_format 不是 lpt_v2_lora_adapter。")
@@ -197,6 +203,7 @@ def load_lora_adapter_state(model, path, *, strict=True):
         for key in incompatible.missing_keys
         if key.endswith("down_projection.weight") or key.endswith("up_projection.weight")
     )
+    # 非 LoRA 基座权重缺失是预期现象；strict 只约束 adapter 权重和 unexpected key。
     if strict and (missing_lora_keys or unexpected):
         raise ValueError(
             "LoRA adapter 权重键不匹配: "

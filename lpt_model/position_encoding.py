@@ -33,17 +33,20 @@ from .longrope import (
 
 
 def _rotate_half(x):
+    """把最后一个维度拆成两半并交换符号，形成 RoPE 的旋转基元。"""
     x1, x2 = x.chunk(2, dim=-1)
     return torch.cat((-x2, x1), dim=-1)
 
 
 def _resolve_target_factor(original_max_len, target_length):
+    """把目标上下文长度转换成 LongRoPE2 需要的缩放因子。"""
     if target_length is None:
         raise ValueError("LongRoPE2 需要显式提供 longrope2_target_length。")
     return max(float(target_length) / float(original_max_len), 1.0)
 
 
 def _normalize_long_factors(head_dim, original_max_len, target_length, long_factors):
+    """把标量、None 或向量形式的 long_factors 统一成逐维列表。"""
     factor = _resolve_target_factor(original_max_len=original_max_len, target_length=target_length)
     rotary_dims = head_dim // 2
 
@@ -95,6 +98,7 @@ class LongRoPE2RotaryPositionEncoding(nn.Module):
             target_length=target_length,
             long_factors=long_factors,
         )
+        # original / long / dynamic 三套 embedding 共存，便于按 profile 切换训练与推理策略。
 
         self.original_embedding = LongRoPEScaledRotaryEmbedding(
             dim=head_dim,
@@ -129,6 +133,7 @@ class LongRoPE2RotaryPositionEncoding(nn.Module):
         self.max_seq_len = max_seq_len
 
     def should_use_rescaled_rope(self, position_ids=None, sequence_length=None):
+        """判断当前位置是否已经越过原始窗口，需要使用 rescaled RoPE。"""
         if sequence_length is None:
             if position_ids is None:
                 raise ValueError("position_ids 和 sequence_length 不能同时为空。")
@@ -137,10 +142,12 @@ class LongRoPE2RotaryPositionEncoding(nn.Module):
 
     @staticmethod
     def build_mode_tensor(is_rescaled, device):
+        """构造给 layer_state 记录的模式标记。"""
         return torch.tensor([1 if is_rescaled else 0], dtype=torch.uint8, device=device)
 
     @staticmethod
     def validate_attention_state_mode(rope_mode, is_rescaled):
+        """检查历史 layer_state 是否仍与当前 RoPE 模式一致。"""
         if rope_mode is None:
             return
         state_is_rescaled = bool(rope_mode.item())
@@ -148,10 +155,12 @@ class LongRoPE2RotaryPositionEncoding(nn.Module):
             raise ValueError("LongRoPE2 跨越原始上下文阈值后需要重建 layer_states。")
 
     def _forward_cos_sin(self, embedding, q, position_ids):
+        """调用底层 LongRoPE 组件，取出 cos/sin 缓存。"""
         seq_len = position_ids.max().item() + 1
         return embedding(q, position_ids, seq_len=seq_len)
 
     def _lookup_mixed_cos_sin(self, q, position_ids):
+        """mixed 模式下按 position_ids 划分原始窗口与长窗区域。"""
         original_cos, original_sin = self._forward_cos_sin(
             self.original_embedding,
             q,
@@ -168,6 +177,7 @@ class LongRoPE2RotaryPositionEncoding(nn.Module):
         return cos, sin
 
     def _lookup_rescaled_cos_sin(self, q, position_ids):
+        """在 dynamic / mixed / static 三类 rescaled 策略之间选择。"""
         if self.embedding_mode == LONGROPE2_DYNAMIC_EMBEDDING_MODE:
             return self._forward_cos_sin(self.dynamic_embedding, q, position_ids)
         if self.embedding_mode == LONGROPE2_MIXED_EMBEDDING_MODE:
@@ -175,6 +185,7 @@ class LongRoPE2RotaryPositionEncoding(nn.Module):
         return self._forward_cos_sin(self.long_embedding, q, position_ids)
 
     def _lookup_cos_sin(self, q, position_ids):
+        """统一处理短窗、长窗和缓存上限检查。"""
         if position_ids.max().item() >= self.max_seq_len:
             raise ValueError(
                 f"位置索引超出了 LongRoPE2 缓存上限 ({self.max_seq_len})，"
@@ -203,10 +214,12 @@ class LongRoPE2RotaryPositionEncoding(nn.Module):
         )
 
     def apply_to_query(self, q, position_ids):
+        """只对 Q 应用 RoPE，供单边注入路径复用。"""
         cos, sin = self._lookup_cos_sin(q, position_ids)
         return (q * cos) + (_rotate_half(q) * sin)
 
     def apply_to_query_and_key(self, q, k, position_ids):
+        """同时对 Q/K 应用 RoPE，供标准 Attention 路径复用。"""
         cos, sin = self._lookup_cos_sin(q, position_ids)
         q_out = (q * cos) + (_rotate_half(q) * sin)
         k_out = (k * cos) + (_rotate_half(k) * sin)
@@ -218,6 +231,8 @@ class LongRoPE2RotaryPositionEncoding(nn.Module):
 
 def build_rotary_position_encoding(config, max_seq_len, *, embedding_mode=None):
     """根据 ModelConfig 构造 LongRoPE2 位置编码。"""
+    # 这里不直接读取全局默认值，而是以 checkpoint / config 中的显式字段为准，
+    # 这样训练、推理和评测在切换 LongRoPE2 策略时不会悄悄漂移。
     if embedding_mode is None:
         embedding_mode = getattr(
             config,

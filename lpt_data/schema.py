@@ -7,6 +7,7 @@ VALID_SAMPLE_TYPES = frozenset({"chat", "text"})
 
 
 def _normalize_optional_string(record, field_name):
+    """把可选字符串字段规范化为去空白文本或 None。"""
     value = record.get(field_name)
     if value is None:
         return None
@@ -17,6 +18,7 @@ def _normalize_optional_string(record, field_name):
 
 
 def _normalize_text_record(record):
+    """标准化 text 样本，确保 text 字段非空且可直接训练。"""
     text = record.get("text")
     if not isinstance(text, str):
         raise TypeError("text 样本的 text 字段必须是字符串。")
@@ -30,6 +32,7 @@ def _normalize_text_record(record):
 
 
 def _normalize_chat_record(record):
+    """标准化 chat 样本，并把 messages 交给模板校验器。"""
     normalized_record = dict(record)
     normalized_record["type"] = "chat"
     normalized_record["messages"] = validate_messages(record.get("messages"))
@@ -63,4 +66,3 @@ def normalize_dataset_record(record, *, default_id=None):
             normalized_record.pop(field_name, None)
 
     return normalized_record
-
