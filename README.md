@@ -45,6 +45,28 @@ README 只作为项目入口、主线边界和目录导航。
 - `main-sft.py`：`chat_sft` 阶段入口。
 - `main-LoRA.py`：`chat_lora` 阶段入口。
 
+## 数据格式
+
+训练数据通过 `data/manifests/*.json` 进入数据管线，manifest 指向 `data/structured/*.jsonl`。
+
+`text` 样本示例：
+
+```json
+{"type": "text", "text": "待训练文本", "source": "example"}
+```
+
+`chat` 样本示例：
+
+```json
+{
+  "type": "chat",
+  "messages": [
+    {"role": "user", "content": "你好"},
+    {"role": "assistant", "content": "你好，我是灵预。"}
+  ],
+  "source": "example"
+}
+```
 
 ## 项目定位
 
