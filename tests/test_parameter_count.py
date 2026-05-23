@@ -106,7 +106,10 @@ class TestMoEAwareParameterCount(unittest.TestCase):
         self.assertGreater(qk_report.adapter_params, q_report.adapter_params)
 
     def test_retnet_context_adapter_adds_adapter_params_without_state_bytes(self):
-        base_config = ModelConfig.from_preset(LPT_V2_DEV_TINY_PRESET)
+        base_config = ModelConfig.from_preset(
+            LPT_V2_DEV_TINY_PRESET,
+            retnet_context_adapter_enabled=False,
+        )
         context_config = base_config.with_overrides(
             retnet_context_adapter_enabled=True,
             retnet_context_adapter_alpha=1e-4,

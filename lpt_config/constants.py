@@ -100,7 +100,7 @@ DEFAULT_EVAL_MAX_BATCHES = None
 # 0 表示默认不保存 step_N checkpoint，只保存 latest。
 DEFAULT_SAVE_INTERVAL_STEPS = 0
 # latest checkpoint 保存间隔，用于中断后恢复训练。
-DEFAULT_LATEST_SAVE_INTERVAL_STEPS = 10
+DEFAULT_LATEST_SAVE_INTERVAL_STEPS = 100
 # 默认保存 optimizer，保证 latest checkpoint 可真正续训。
 DEFAULT_SAVE_OPTIMIZER = True
 # 默认保存 scheduler，保证 resume 后学习率曲线连续。
@@ -128,7 +128,7 @@ CHAT_SFT_ARTIFACT_DIR = ARTIFACT_ROOT_DIR / "chat_sft"
 CHAT_LORA_ARTIFACT_DIR = ARTIFACT_ROOT_DIR / "chat_lora"
 
 # text_pretrain 默认 batch size，作为 recipe 默认值，CLI 可覆盖。
-TEXT_PRETRAIN_BATCH_SIZE = 2
+TEXT_PRETRAIN_BATCH_SIZE = 1
 # text_pretrain 默认 epoch 数。
 TEXT_PRETRAIN_EPOCHS = 1
 # text_pretrain 默认学习率。

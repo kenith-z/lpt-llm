@@ -208,6 +208,9 @@ class TestModelConfig(unittest.TestCase):
         with self.assertRaises(ValueError):
             ModelConfig.from_preset(
                 LPT_V2_DEV_TINY_PRESET,
+                xlstm_memory_enabled=False,
+                xlstm_memory_layers="disabled",
+                moe_router_input_mode="ffn_norm_only_eval",
                 xlstm_memory_gate_enabled=True,
             )
 

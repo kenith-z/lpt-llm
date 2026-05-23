@@ -311,57 +311,57 @@ class ModelConfig:
     kv_cache_scope: str = "local_real_tokens_only"
     # Paged KV 单个 page/block 包含的 token 数。
     page_block_size: int = 256
-    # 是否启用 v2 RetNetAssist 全局摘要。
+    # RetNetAssist 基础开关；第 24/25/26/27 项都以启用该全局摘要为前提。
     retnet_assist_enabled: bool = True
-    # RetNetAssist 作用模式；主线默认 Q adapter，第 24 项允许 Q/K adapter 做单项实验。
+    # 第 24 项：RetNetAssist 作用模式；主线默认 Q adapter，Q/K adapter 只作为归档对照。
     retnet_assist_mode: str = "q_adapter"
-    # RetNetAssist 启用层策略，如 every_4_layers / selected_layers / all_layers。
+    # 第 26 项：RetNetAssist 启用层策略，实验后选定 every_4_layers/rank16 作为主候选。
     retnet_assist_layers: str = "every_4_layers"
-    # selected_layers 策略下显式启用的层号，0 基索引。
+    # 第 26 项：selected_layers 策略下显式启用的层号，0 基索引。
     retnet_assist_selected_layers: tuple[int, ...] = field(default_factory=tuple)
-    # RetNetAssist 参数共享策略，global 表示跨层共享一组参数。
+    # 第 25 项：RetNetAssist 参数共享策略，global 表示跨层共享一组参数。
     retnet_parameter_sharing: str = "global"
-    # RetNetAssist group sharing 的连续层分组大小。
+    # 第 25 项：RetNetAssist group sharing 的连续层分组大小。
     retnet_sharing_group_size: int = 4
-    # RetNetAssist 状态共享策略，group 表示按共享组维护状态。
-    retnet_state_sharing: str = "group"
+    # 第 25 项：RetNetAssist 状态共享策略；选定 global/per_layer 作为组合候选。
+    retnet_state_sharing: str = "per_layer"
     # RetNetAssist prefill 扫描策略，要求支持 sequence parallel 友好的 chunkwise scan。
     retnet_prefill_scan_policy: str = "sp_compatible_chunkwise_scan"
     # RetNetAssist 在 sequence parallel 下的状态交接策略。
     retnet_sequence_parallel_policy: str = "disabled"
     # 是否记录 RetNetAssist sequence-parallel handoff 指标。
     retnet_sp_handoff_metrics_enabled: bool = True
-    # RetNetAssist 状态生命周期；必须绑定 request state pool。
+    # 第 25/26/27 项：RetNetAssist 状态生命周期；必须绑定 request state pool。
     retnet_state_lifecycle: str = "request_bound_state_pool"
-    # RetNetAssist 轻量全局摘要状态维度。
+    # 第 26 项：RetNetAssist 轻量全局摘要状态维度。
     retnet_state_dim: int = 64
-    # RetNetAssist Q adapter 的低秩投影 rank。
+    # 第 26 项：RetNetAssist Q adapter 的低秩投影 rank，实验后保持 rank16。
     retnet_adapter_rank: int = 16
-    # RetNetAssist adapter 目标；默认只调制 Q，第 24 项允许同时调制 Q/K。
+    # 第 24 项：RetNetAssist adapter 目标；默认只调制 Q，Q/K 不进入默认主干。
     retnet_adapter_target: tuple[str, ...] = field(default_factory=lambda: ("q",))
-    # Q adapter FP32 scale 初始值。
+    # 第 24/26 项：Q adapter FP32 scale 初始值。
     retnet_adapter_alpha_q_init: float = 1e-4
-    # Q adapter alpha 的参数 dtype；当前固定 FP32。
+    # 第 24/26 项：Q adapter alpha 的参数 dtype；当前固定 FP32。
     retnet_adapter_alpha_q_dtype: str = "fp32"
-    # Q adapter alpha 是否可训练。
+    # 第 24/26 项：Q adapter alpha 是否可训练。
     retnet_adapter_alpha_q_trainable: bool = True
-    # K adapter FP32 scale 初始值；只有 retnet_k_adapter_enabled=true 时实例化参数。
+    # 第 24 项：K adapter FP32 scale 初始值；只有 retnet_k_adapter_enabled=true 时实例化参数。
     retnet_adapter_alpha_k_init: float = 1e-4
-    # K adapter alpha 的参数 dtype；当前固定 FP32。
+    # 第 24 项：K adapter alpha 的参数 dtype；当前固定 FP32。
     retnet_adapter_alpha_k_dtype: str = "fp32"
-    # K adapter alpha 是否可训练。
+    # 第 24 项：K adapter alpha 是否可训练。
     retnet_adapter_alpha_k_trainable: bool = True
-    # 是否启用 K adapter；默认关闭，仅第 24 项实验打开。
+    # 第 24 项：是否启用 K adapter；实验结论为不进入主干，默认关闭。
     retnet_k_adapter_enabled: bool = False
-    # 是否启用上下文 adapter；复用 RetNetAssist summary，不新增第二套状态。
-    retnet_context_adapter_enabled: bool = False
-    # 上下文 adapter 的 FP32 trainable scale 初始值；未启用时保持 0。
+    # 第 27 项：是否启用上下文 adapter；复用 RetNetAssist summary，不新增第二套状态。
+    retnet_context_adapter_enabled: bool = True
+    # 第 27 项：上下文 adapter 的 FP32 trainable scale 初始值。
     retnet_context_adapter_alpha: float = 0.0
-    # RetNetAssist 是否写入 Paged KV；必须为 false。
+    # 第 19/24/27 项约束：RetNetAssist 是否写入 Paged KV；必须为 false。
     retnet_enters_paged_kv: bool = False
-    # RetNetAssist 是否替换 KV cache；必须为 false。
+    # 第 19/24/27 项约束：RetNetAssist 是否替换 KV cache；必须为 false。
     retnet_kv_replacement: bool = False
-    # 是否从 RetNetAssist 生成 attention logit bias；当前禁止。
+    # 第 24/27 项约束：是否从 RetNetAssist 生成 attention logit bias；当前禁止。
     attention_logit_bias_from_retnet: bool = False
     # FFN 类型；v2 使用 memory-augmented SwiGLU MoE。
     ffn_type: str = "memory_augmented_swiglu_moe"
@@ -375,71 +375,71 @@ class ModelConfig:
     moe_load_balance_loss_enabled: bool = True
     # 是否启用 router z-loss。
     moe_router_z_loss_enabled: bool = True
-    # Router 输入模式，控制是否读取 xLSTM memory 调制后的 x_ffn。
-    moe_router_input_mode: str = "ffn_norm_only_eval"
-    # 是否启用 FFN 侧 xLSTMAssist 记忆。
-    xlstm_memory_enabled: bool = False
-    # xLSTMAssist 作用模式；当前作为 FFN 输入 adapter。
+    # 第 21/23 项：Router 输入模式，控制是否读取 xLSTM memory 调制后的 x_ffn。
+    moe_router_input_mode: str = "memory_augmented_input"
+    # 第 19 项：是否启用 FFN 侧 xLSTMAssist 记忆。
+    xlstm_memory_enabled: bool = True
+    # 第 19/21 项：xLSTMAssist 作用模式；当前作为 FFN 输入 adapter。
     xlstm_memory_mode: str = "ffn_input_adapter"
-    # xLSTMAssist 启用层策略；关闭时必须为 disabled。
-    xlstm_memory_layers: str = "disabled"
-    # selected_layers 策略下显式启用的层号，0 基索引。
+    # 第 23 项：xLSTMAssist 启用层策略；选定 every_4_layers 作为记忆粒度候选。
+    xlstm_memory_layers: str = "every_4_layers"
+    # 第 23 项：selected_layers 策略下显式启用的层号，0 基索引。
     xlstm_memory_selected_layers: tuple[int, ...] = field(default_factory=tuple)
-    # xLSTMAssist 记忆状态维度。
+    # 第 19/20 项：xLSTMAssist 记忆状态维度。
     xlstm_memory_state_dim: int = 64
-    # xLSTMAssist memory adapter 的低秩投影 rank。
+    # 第 21 项：xLSTMAssist memory adapter 的低秩投影 rank。
     xlstm_memory_adapter_rank: int = 16
-    # xLSTM memory adapter beta 初始值。
+    # 第 21 项：xLSTM memory adapter beta 初始值。
     xlstm_memory_adapter_beta_init: float = 1e-4
-    # xLSTM memory adapter beta 参数 dtype；固定 FP32。
+    # 第 21 项：xLSTM memory adapter beta 参数 dtype；固定 FP32。
     xlstm_memory_adapter_beta_dtype: str = "fp32"
-    # xLSTM memory adapter beta 的有效值约束策略。
+    # 第 21 项：xLSTM memory adapter beta 的有效值约束策略。
     xlstm_memory_adapter_beta_policy: str = "fp32_sigmoid_clamped"
-    # xLSTM memory adapter beta 的有效取值范围。
+    # 第 21 项：xLSTM memory adapter beta 的有效取值范围。
     xlstm_memory_adapter_beta_range: tuple[float, float] = (1e-5, 1.0)
-    # xLSTMAssist 是否作为 router 目标；必须为 false。
+    # 第 19 项约束：xLSTMAssist 是否作为 router 目标；必须为 false。
     xlstm_memory_as_router_target: bool = False
-    # 是否启用额外 memory gate；当前为实验预留。
+    # 第 22 项：是否启用额外 memory gate；实验结论为放弃，默认关闭。
     xlstm_memory_gate_enabled: bool = False
-    # memory gate 模式；仅在启用 gate 时生效。
+    # 第 22 项：memory gate 模式；仅在启用 gate 时生效。
     xlstm_memory_gate_mode: str = "input_conditioned_eval"
-    # xLSTMAssist 状态粒度策略。
-    xlstm_memory_granularity: str = "selected_layers"
-    # xLSTMAssist prefill 策略。
+    # 第 23 项：xLSTMAssist 状态粒度策略；与 every_4_layers 层策略保持一致。
+    xlstm_memory_granularity: str = "every_4_layers"
+    # 第 19/20 项：xLSTMAssist prefill 策略。
     xlstm_memory_prefill_policy: str = "chunkwise_recurrent_scan"
-    # xLSTMAssist 状态从 prefill 延续到 decode 的策略。
+    # 第 19/20 项：xLSTMAssist 状态从 prefill 延续到 decode 的策略。
     xlstm_memory_state_continuity: str = "prefill_to_decode"
-    # xLSTMAssist 状态生命周期；必须绑定 request state pool。
+    # 第 20 项：xLSTMAssist 状态生命周期；必须绑定 request state pool。
     xlstm_memory_state_lifecycle: str = "request_bound_state_pool"
-    # xLSTMAssist 状态更新策略；启用层确定性更新。
+    # 第 20 项：xLSTMAssist 状态更新策略；启用层确定性更新。
     xlstm_memory_update_policy: str = "deterministic_on_enabled_layers"
-    # xLSTMAssist 状态遗忘/重置策略。
+    # 第 20 项：xLSTMAssist 状态遗忘/重置策略。
     xlstm_memory_state_policy: str = "window_decay_and_boundary_reset"
-    # xLSTMAssist 状态窗口大小；None 表示不按固定窗口截断。
+    # 第 20 项：xLSTMAssist 状态窗口大小；None 表示不按固定窗口截断。
     xlstm_memory_state_window_size: int | None = None
-    # xLSTMAssist decay 计数单位。
+    # 第 20 项：xLSTMAssist decay 计数单位。
     xlstm_memory_decay_counter_unit: str = "tokens"
-    # xLSTMAssist 每隔多少 token 触发一次 decay。
+    # 第 20 项：xLSTMAssist 每隔多少 token 触发一次 decay。
     xlstm_memory_state_decay_interval: int = 1024
-    # xLSTMAssist decay 乘法因子。
+    # 第 20 项：xLSTMAssist decay 乘法因子。
     xlstm_memory_state_decay_factor: float = 0.95
-    # 触发 xLSTMAssist reset 的事件来源。
+    # 第 20 项：触发 xLSTMAssist reset 的事件来源。
     xlstm_memory_reset_trigger_mode: tuple[str, ...] = field(
         default_factory=lambda: ("boundary_metadata", "special_token", "session_event")
     )
-    # reset 支持的语义边界类型。
+    # 第 20 项：reset 支持的语义边界类型。
     xlstm_memory_reset_boundary_policy: tuple[str, ...] = field(
         default_factory=lambda: ("document", "file", "chapter", "session_reset")
     )
-    # 触发 reset 的特殊 token id 列表。
+    # 第 20 项：触发 reset 的特殊 token id 列表。
     xlstm_memory_boundary_token_ids: tuple[int, ...] = field(default_factory=tuple)
-    # reset 动作；当前固定清零状态。
+    # 第 20 项：reset 动作；当前固定清零状态。
     xlstm_memory_reset_action: str = "zero_state"
-    # xLSTMAssist 是否作为 MoE expert；必须为 false。
+    # 第 19 项约束：xLSTMAssist 是否作为 MoE expert；必须为 false。
     xlstm_memory_as_expert: bool = False
-    # xLSTM expert 数量；v2 中必须为 0。
+    # 第 19 项约束：xLSTM expert 数量；v2 中必须为 0。
     xlstm_expert_count: int = 0
-    # xLSTM 是否作为独立主干 block；必须为 false。
+    # 第 19 项约束：xLSTM 是否作为独立主干 block；必须为 false。
     xlstm_as_standalone_block: bool = False
     # MoE router warmup 策略；当前只使用标准 balance 约束。
     moe_router_warmup_policy: str = "standard_balance_only"

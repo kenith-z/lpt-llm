@@ -34,6 +34,7 @@ from lpt_lora import (
 )
 from lpt_model import LPTV2
 from lpt_protocol import DS_BOS_TOKEN, DS_EOS_TOKEN, DS_PAD_TOKEN
+from lpt_data import build_streaming_manifest_dataset
 from lpt_training import (
     TrainingRunConfig,
     has_complete_training_state,
@@ -261,6 +262,121 @@ class TestLPTV2Workflows(unittest.TestCase):
         self.assertIn("tokens_per_sec", metric_line)
         self.assertIn("grad_norm", metric_line)
         self.assertEqual(json.loads(metric_line)["sequence_length"], 4)
+
+    def test_manifest_data_progress_resumes_new_entries_and_skips_weight_zero(self):
+        GlobalConfig.parameter_dtype = torch.float32
+        GlobalConfig.device = torch.device("cpu")
+        model = LPTV2(128, build_tiny_config())
+        tokenizer = DummyTokenizer()
+        artifact_dir = build_workspace_tmp_dir("workflow_data_progress")
+        dataset_dir = artifact_dir / "data"
+        dataset_dir.mkdir()
+        manifest_path = artifact_dir / "manifest.json"
+        dataset_a = dataset_dir / "a.text.jsonl"
+        dataset_b = dataset_dir / "b.text.jsonl"
+        dataset_a.write_text(
+            json.dumps({"id": "a-1", "type": "text", "text": "旧数据", "source": "a"}, ensure_ascii=False)
+            + "\n",
+            encoding="utf-8",
+        )
+        dataset_b.write_text(
+            json.dumps({"id": "b-1", "type": "text", "text": "新增数据", "source": "b"}, ensure_ascii=False)
+            + "\n",
+            encoding="utf-8",
+        )
+        manifest_path.write_text(
+            json.dumps(
+                {"datasets": [{"name": "old", "path": "data/a.text.jsonl", "weight": 1}]},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        initial_dataset = build_streaming_manifest_dataset(
+            manifest_path,
+            expected_types={"text"},
+            shuffle_buffer_size=1,
+            seed=3,
+        )
+        initial_state = train(
+            model,
+            tokenizer,
+            initial_dataset,
+            config=TrainingRunConfig(
+                training_stage="unit_data_progress",
+                artifact_dir=artifact_dir,
+                checkpoint_dir=artifact_dir / "checkpoints" / "latest",
+                inference_weight_path=artifact_dir / "weights" / "model_weights.pth",
+                save_inference_weights=False,
+                batch_size=1,
+                epochs=1,
+                max_steps=None,
+                latest_save_interval=0,
+                warmup_ratio=0.0,
+                max_sequence_length=16,
+                seed=3,
+                source_manifest=manifest_path,
+                save_scheduler=False,
+                tensorboard_enabled=False,
+            ),
+        )
+        self.assertEqual(initial_state["global_step"], 1)
+
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "datasets": [
+                        {"name": "old", "path": "data/a.text.jsonl", "weight": 0},
+                        {"name": "new", "path": "data/b.text.jsonl", "weight": 1},
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        resumed_dataset = build_streaming_manifest_dataset(
+            manifest_path,
+            expected_types={"text"},
+            shuffle_buffer_size=1,
+            seed=3,
+        )
+        resumed_state = train(
+            model,
+            tokenizer,
+            resumed_dataset,
+            config=TrainingRunConfig(
+                training_stage="unit_data_progress",
+                artifact_dir=artifact_dir,
+                checkpoint_dir=artifact_dir / "checkpoints" / "latest",
+                inference_weight_path=artifact_dir / "weights" / "model_weights.pth",
+                save_inference_weights=False,
+                batch_size=1,
+                epochs=1,
+                max_steps=None,
+                latest_save_interval=0,
+                warmup_ratio=0.0,
+                max_sequence_length=16,
+                seed=3,
+                resume_checkpoint=artifact_dir / "checkpoints" / "latest",
+                source_manifest=manifest_path,
+                save_scheduler=False,
+                tensorboard_enabled=False,
+            ),
+        )
+
+        progress_path = artifact_dir / "checkpoints" / "latest" / "data_progress.json"
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        entries_by_name = {entry["entry_name"]: entry for entry in progress["entries"]}
+        self.assertEqual(resumed_state["global_step"], 2)
+        self.assertFalse(Path(progress["manifest_path"]).is_absolute())
+        self.assertEqual(progress["active_entry_count"], 1)
+        self.assertFalse(entries_by_name["old"]["active"])
+        self.assertEqual(entries_by_name["old"]["total_consumed_samples"], 1)
+        self.assertFalse(Path(entries_by_name["new"]["path"]).is_absolute())
+        self.assertFalse(Path(entries_by_name["new"]["entry_key"]).is_absolute())
+        self.assertEqual(entries_by_name["new"]["completed_epochs"], 1)
+        self.assertEqual(entries_by_name["new"]["total_consumed_samples"], 1)
+        self.assertTrue((artifact_dir / "config" / "data_progress.json").exists())
 
     def test_training_loop_can_skip_inference_weight_export(self):
         GlobalConfig.parameter_dtype = torch.float32

@@ -228,6 +228,7 @@ class TestLPTV2Model(unittest.TestCase):
             layer_block_types=("attention", "attention", "attention", "attention"),
             retnet_assist_layers="selected_layers",
             retnet_assist_selected_layers=(1, 3),
+            retnet_state_sharing="group",
         )
         model = LPTV2(32, config)
 

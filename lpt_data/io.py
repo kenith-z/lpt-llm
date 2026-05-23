@@ -11,13 +11,19 @@ from torch.utils.data import IterableDataset
 from .schema import normalize_dataset_record
 
 
+DATA_PROGRESS_RECORD_KEY = "_lpt_data_progress"
+
+
 @dataclass(frozen=True)
 class ManifestEntryPlan:
     """描述单个 manifest 条目的流式采样计划。"""
 
+    entry_index: int
     name: str
     path: Path
     weight: float
+    sample_limit: int | None
+    source_record_count: int
     repeat_count: int
     base_indices: tuple[int, ...] | None
     extra_indices: tuple[int, ...]
@@ -65,35 +71,124 @@ class StreamingManifestDataset(IterableDataset):
         self._iteration_index += 1
         return current_seed
 
-    def _iter_manifest_records(self):
+    def _iter_manifest_records(self, *, include_progress_metadata=True):
         """按 entry plan 顺序流式产出被选中的记录。"""
         for entry_plan in self.entry_plans:
+            sample_ordinal = 0
             if entry_plan.repeat_count > 0:
-                for _ in range(entry_plan.repeat_count):
-                    yield from _iter_selected_records(
+                for repeat_index in range(entry_plan.repeat_count):
+                    for record_index, record in _iter_selected_records_with_index(
                         entry_plan.path,
                         entry_plan.base_indices,
                         expected_types=self.expected_types,
-                    )
+                    ):
+                        if include_progress_metadata:
+                            yield _attach_progress_metadata(
+                                record,
+                                entry_plan,
+                                record_index=record_index,
+                                sample_ordinal=sample_ordinal,
+                                pass_index=repeat_index,
+                                pass_kind="repeat",
+                            )
+                        else:
+                            yield record
+                        sample_ordinal += 1
             if entry_plan.extra_indices:
-                yield from _iter_selected_records(
-                    entry_plan.path,
-                    entry_plan.extra_indices,
-                    expected_types=self.expected_types,
-                )
+                for extra_index, (record_index, record) in enumerate(
+                    _iter_selected_records_with_index(
+                        entry_plan.path,
+                        entry_plan.extra_indices,
+                        expected_types=self.expected_types,
+                    )
+                ):
+                    if include_progress_metadata:
+                        yield _attach_progress_metadata(
+                            record,
+                            entry_plan,
+                            record_index=record_index,
+                            sample_ordinal=sample_ordinal,
+                            pass_index=extra_index,
+                            pass_kind="extra",
+                        )
+                    else:
+                        yield record
+                    sample_ordinal += 1
 
     def iter_records_for_scan(self):
         """提供不影响训练 shuffle seed 的顺序扫描入口。"""
-        yield from self._iter_manifest_records()
+        yield from self._iter_manifest_records(include_progress_metadata=False)
 
-    def __iter__(self):
-        """训练迭代入口：对流式记录做 buffer shuffle。"""
-        rng = random.Random(self._next_iteration_seed())
+    def iter_records_for_epoch(self, epoch_index):
+        """按指定 epoch 产出带来源元数据的训练样本。"""
+        rng = random.Random(self._seed_for_epoch(epoch_index))
         yield from _iter_buffer_shuffled_records(
-            self._iter_manifest_records(),
+            self._iter_manifest_records(include_progress_metadata=True),
             buffer_size=self.shuffle_buffer_size,
             rng=rng,
         )
+
+    def _seed_for_epoch(self, epoch_index):
+        """根据训练 epoch 生成稳定 shuffle seed，不推进内部迭代计数。"""
+        if self.seed is None:
+            return random.randrange(0, 2**31)
+        return int(self.seed) + int(epoch_index)
+
+    def __iter__(self):
+        """训练迭代入口：对流式记录做 buffer shuffle。"""
+        current_iteration = self._iteration_index
+        self._iteration_index += 1
+        yield from self.iter_records_for_epoch(current_iteration)
+
+
+def _attach_progress_metadata(record, entry_plan, *, record_index, sample_ordinal, pass_index, pass_kind):
+    """给训练样本附加不可见的来源进度元数据，供 checkpoint 记录数据进度。"""
+    enriched_record = dict(record)
+    enriched_record[DATA_PROGRESS_RECORD_KEY] = {
+        "entry_index": int(entry_plan.entry_index),
+        "entry_name": entry_plan.name,
+        "entry_key": _entry_progress_key(entry_plan.name, entry_plan.path),
+        "path": _progress_path_string(entry_plan.path),
+        "line_index": int(record_index),
+        "sample_ordinal": int(sample_ordinal),
+        "pass_index": int(pass_index),
+        "pass_kind": str(pass_kind),
+    }
+    return enriched_record
+
+
+def _progress_path_string(path):
+    """把数据进度路径规范化为项目相对 POSIX 路径。"""
+    path = Path(path)
+    project_root = Path.cwd().resolve()
+    try:
+        resolved_path = path.resolve() if path.is_absolute() else (project_root / path).resolve()
+        return resolved_path.relative_to(project_root).as_posix()
+    except (OSError, ValueError):
+        return path.as_posix()
+
+
+def _entry_progress_key(entry_name, dataset_path):
+    """生成数据进度使用的稳定 entry key。"""
+    return _progress_path_string(dataset_path)
+
+
+def _iter_selected_records_with_index(dataset_path, selected_indices, expected_types):
+    """按索引过滤 JSONL 记录，并保留原始记录索引。"""
+    selected_index_set = None if selected_indices is None else set(selected_indices)
+    for record_index, record in _iter_dataset_records_with_index(dataset_path, expected_types=expected_types):
+        if selected_index_set is None or record_index in selected_index_set:
+            yield record_index, record
+
+
+def _iter_selected_records(dataset_path, selected_indices, expected_types):
+    """按索引过滤 JSONL 记录；selected_indices=None 表示全量读取。"""
+    for _, record in _iter_selected_records_with_index(
+        dataset_path,
+        selected_indices,
+        expected_types,
+    ):
+        yield record
 
 
 def _iter_dataset_records_with_index(dataset_path, expected_types=None):
@@ -252,7 +347,7 @@ def _pick_from_base_selection(base_indices, base_count, total_count, target_coun
     return tuple(base_indices[position] for position in picked_positions)
 
 
-def _build_manifest_entry_plan(manifest_path, entry, expected_types):
+def _build_manifest_entry_plan(manifest_path, entry_index, entry, expected_types):
     """把单个 manifest entry 编译成可流式执行的采样计划。"""
     dataset_path = entry.get("path")
     if not isinstance(dataset_path, str) or not dataset_path.strip():
@@ -261,9 +356,24 @@ def _build_manifest_entry_plan(manifest_path, entry, expected_types):
     resolved_dataset_path = _resolve_manifest_dataset_path(manifest_path, dataset_path)
     entry_name = entry.get("name") or resolved_dataset_path.stem
     seed_text = f"{manifest_path}:{entry_name}:{resolved_dataset_path}"
+    weight = _normalize_weight(entry.get("weight", 1.0))
+    sample_limit = entry.get("sample_limit")
+    if weight == 0:
+        return ManifestEntryPlan(
+            entry_index=entry_index,
+            name=entry_name,
+            path=resolved_dataset_path,
+            weight=weight,
+            sample_limit=sample_limit,
+            source_record_count=0,
+            repeat_count=0,
+            base_indices=None,
+            extra_indices=(),
+            selected_count=0,
+        )
+
     total_count = _count_dataset_records(resolved_dataset_path, expected_types=expected_types)
 
-    sample_limit = entry.get("sample_limit")
     base_indices = None
     base_count = total_count
     if sample_limit is not None:
@@ -277,12 +387,8 @@ def _build_manifest_entry_plan(manifest_path, entry, expected_types):
                 f"{seed_text}:sample_limit",
             )
 
-    weight = _normalize_weight(entry.get("weight", 1.0))
     # plan 只保存索引和重复次数，不保存记录内容；大数据集可在训练时逐行读取。
-    if weight == 0:
-        repeat_count = 0
-        extra_indices = ()
-    elif weight < 1:
+    if weight < 1:
         repeat_count = 0
         target_count = max(1, int(round(base_count * weight))) if base_count else 0
         extra_indices = _pick_from_base_selection(
@@ -306,22 +412,17 @@ def _build_manifest_entry_plan(manifest_path, entry, expected_types):
 
     selected_count = base_count * repeat_count + len(extra_indices)
     return ManifestEntryPlan(
+        entry_index=entry_index,
         name=entry_name,
         path=resolved_dataset_path,
         weight=weight,
+        sample_limit=sample_limit,
+        source_record_count=total_count,
         repeat_count=repeat_count,
         base_indices=base_indices,
         extra_indices=extra_indices,
         selected_count=selected_count,
     )
-
-
-def _iter_selected_records(dataset_path, selected_indices, expected_types):
-    """按索引过滤 JSONL 记录；selected_indices=None 表示全量读取。"""
-    selected_index_set = None if selected_indices is None else set(selected_indices)
-    for record_index, record in _iter_dataset_records_with_index(dataset_path, expected_types=expected_types):
-        if selected_index_set is None or record_index in selected_index_set:
-            yield record
 
 
 def _summarize_entry_plan(entry_plan, expected_types):
@@ -391,6 +492,7 @@ def build_streaming_manifest_dataset(
 
         entry_plan = _build_manifest_entry_plan(
             manifest_path,
+            entry_index,
             entry,
             expected_types=expected_types,
         )
@@ -407,6 +509,8 @@ def build_streaming_manifest_dataset(
                 "path": str(entry_plan.path),
                 "count": entry_plan.selected_count,
                 "weight": entry_plan.weight,
+                "sample_limit": entry_plan.sample_limit,
+                "source_record_count": entry_plan.source_record_count,
             }
         )
         global_type_counter.update(entry_type_counter)

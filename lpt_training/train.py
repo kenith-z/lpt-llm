@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -39,7 +40,7 @@ from lpt_config import (
     DEFAULT_WEIGHT_DECAY,
     GlobalConfig,
 )
-from lpt_data import build_packed_training_batch, build_training_batch
+from lpt_data import DATA_PROGRESS_RECORD_KEY, build_packed_training_batch, build_training_batch
 from lpt_lora import save_lora_adapter_state
 from lpt_model import save_lpt_v2_checkpoint
 from lpt_runtime.files import atomic_torch_save, atomic_write_text, is_torch_save_file_readable
@@ -58,10 +59,12 @@ LORA_ADAPTER_CHECKPOINT_NAME = "adapter.pt"
 OPTIMIZER_CHECKPOINT_NAME = "optimizer.pt"
 SCHEDULER_CHECKPOINT_NAME = "scheduler.pt"
 TRAINER_STATE_NAME = "trainer_state.json"
+DATA_PROGRESS_NAME = "data_progress.json"
 METRICS_JSONL_NAME = "metrics.jsonl"
 CHECKPOINT_MANIFEST_NAME = "checkpoint_manifest.json"
 TRAINING_CHECKPOINT_FORMAT = "lpt_v2_training_checkpoint"
 TRAINING_CHECKPOINT_SCHEMA_VERSION = 1
+DATA_PROGRESS_SCHEMA_VERSION = 1
 LM_LOSS_CHUNK_TOKENS = 256
 
 PHASE_DISPLAY_NAMES = {
@@ -231,6 +234,11 @@ def _checkpoint_file(checkpoint_root, name=MODEL_CHECKPOINT_NAME):
 def _trainer_state_file(checkpoint_root):
     """返回 trainer_state.json 路径。"""
     return Path(checkpoint_root) / TRAINER_STATE_NAME
+
+
+def _data_progress_file(checkpoint_root):
+    """返回 data_progress.json 路径。"""
+    return Path(checkpoint_root) / DATA_PROGRESS_NAME
 
 
 def _checkpoint_manifest_file(checkpoint_root):
@@ -428,6 +436,14 @@ def load_trainer_state(checkpoint_root):
     return json.loads(state_path.read_text(encoding="utf-8"))
 
 
+def load_data_progress(checkpoint_root):
+    """读取 checkpoint 内的数据训练进度。"""
+    progress_path = _data_progress_file(checkpoint_root)
+    if not progress_path.exists():
+        return None
+    return json.loads(progress_path.read_text(encoding="utf-8"))
+
+
 def _iter_trainable_parameters(model):
     """迭代当前需要优化的参数，LoRA 模式下只会返回未冻结参数。"""
     for parameter_name, parameter in model.named_parameters():
@@ -568,6 +584,419 @@ def _resolve_remaining_batch_budget(total_batch_budget, global_step):
     if total_batch_budget is None:
         return None
     return max(0, int(total_batch_budget) - int(global_step))
+
+
+def _hash_int_tuple(values):
+    """对索引 tuple 生成紧凑 hash，避免把大索引列表写入进度摘要。"""
+    if values is None:
+        return None
+    digest = hashlib.sha256()
+    for value in values:
+        digest.update(str(int(value)).encode("ascii"))
+        digest.update(b",")
+    return digest.hexdigest()
+
+
+def _hash_json_payload(payload):
+    """对 JSON 友好对象生成稳定 hash。"""
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _hash_dataset_content(dataset_path):
+    """计算 JSONL 非空行内容指纹，用于续训时发现已有数据被改写。"""
+    digest = hashlib.sha256()
+    record_count = 0
+    with Path(dataset_path).open("r", encoding="utf-8") as dataset_file:
+        for raw_line in dataset_file:
+            line = raw_line.strip()
+            if not line:
+                continue
+            digest.update(line.encode("utf-8"))
+            digest.update(b"\n")
+            record_count += 1
+    return record_count, digest.hexdigest()
+
+
+def _progress_path_string(path):
+    """把 data_progress 中的路径规范化为项目相对 POSIX 路径。"""
+    path = Path(path)
+    project_root = Path.cwd().resolve()
+    try:
+        resolved_path = path.resolve() if path.is_absolute() else (project_root / path).resolve()
+        return resolved_path.relative_to(project_root).as_posix()
+    except (OSError, ValueError):
+        return path.as_posix()
+
+
+def _entry_progress_key(entry_plan):
+    """返回与数据样本元数据一致的 entry key。"""
+    return _progress_path_string(entry_plan.path)
+
+
+def _entry_plan_policy(entry_plan):
+    """提取会影响样本选择的 manifest 策略。"""
+    return {
+        "weight": float(entry_plan.weight),
+        "sample_limit": entry_plan.sample_limit,
+        "repeat_count": int(entry_plan.repeat_count),
+        "base_indices_hash": _hash_int_tuple(entry_plan.base_indices),
+        "extra_indices_hash": _hash_int_tuple(entry_plan.extra_indices),
+        "selected_count": int(entry_plan.selected_count),
+    }
+
+
+def _build_entry_progress_template(entry_plan, config, *, active):
+    """从当前 manifest entry plan 构造数据进度基础字段。"""
+    if active:
+        source_record_count, content_hash = _hash_dataset_content(entry_plan.path)
+        if source_record_count != int(entry_plan.source_record_count):
+            raise ValueError(
+                f"数据集扫描结果不一致: {entry_plan.path}，"
+                f"plan={entry_plan.source_record_count} fingerprint={source_record_count}"
+            )
+    else:
+        content_hash = None
+    policy = _entry_plan_policy(entry_plan)
+    return {
+        "entry_key": _entry_progress_key(entry_plan),
+        "entry_index": int(entry_plan.entry_index),
+        "entry_name": entry_plan.name,
+        "path": _progress_path_string(entry_plan.path),
+        "active": bool(active),
+        "weight": float(entry_plan.weight),
+        "sample_limit": entry_plan.sample_limit,
+        "source_record_count": int(entry_plan.source_record_count),
+        "source_content_hash": content_hash,
+        "planned_sample_count_per_epoch": int(entry_plan.selected_count),
+        "target_total_epochs": int(config.epochs),
+        "target_total_samples": int(entry_plan.selected_count) * max(1, int(config.epochs)),
+        "plan_policy": policy,
+        "plan_fingerprint": _hash_json_payload(policy),
+        "completed_epochs": 0,
+        "consumed_in_current_epoch": 0,
+        "total_consumed_samples": 0,
+        "consumed_ordinals_in_current_epoch": [],
+    }
+
+
+def _previous_progress_entries(progress):
+    """把历史 data_progress entries 转成 key 索引。"""
+    if not isinstance(progress, dict):
+        return {}
+    entries = progress.get("entries")
+    if not isinstance(entries, list):
+        return {}
+    result = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_key = entry.get("entry_key")
+        if isinstance(entry_key, str) and entry_key:
+            result[entry_key] = entry
+    return result
+
+
+def _validate_resume_entry_progress(template, previous_entry):
+    """校验续训时同一数据集的 manifest 策略和文件内容没有被改写。"""
+    if not previous_entry:
+        return
+    previous_consumed = int(previous_entry.get("total_consumed_samples", 0) or 0)
+    if previous_consumed <= 0:
+        return
+    previous_policy = previous_entry.get("plan_policy")
+    if previous_policy is not None and previous_policy != template["plan_policy"]:
+        raise ValueError(
+            f"续训检测到数据集训练策略变化: {template['entry_name']}。"
+            "除 weight=0/移除跳过外，已训练数据集不允许修改 weight 或 sample_limit。"
+        )
+    if int(previous_entry.get("source_record_count", -1)) != int(template["source_record_count"]):
+        raise ValueError(
+            f"续训检测到数据集行数变化: {template['path']}。"
+            "请把新增内容作为新的 manifest 数据集，或重置该数据集进度后再训练。"
+        )
+    previous_hash = previous_entry.get("source_content_hash")
+    if previous_hash and previous_hash != template["source_content_hash"]:
+        raise ValueError(
+            f"续训检测到数据集内容被修改: {template['path']}。"
+            "为避免进度错位，请恢复原文件或重置该数据集进度。"
+        )
+
+
+class DataProgressTracker:
+    """维护 manifest 维度的数据训练账本。"""
+
+    def __init__(self, dataset, config, *, previous_progress=None):
+        self.enabled = hasattr(dataset, "entry_plans") and hasattr(dataset, "iter_records_for_epoch")
+        self.manifest_path = None if not hasattr(dataset, "manifest_path") else Path(dataset.manifest_path)
+        self.target_total_epochs = max(1, int(config.epochs))
+        self.entries = {}
+        self.inactive_entries = {}
+        if not self.enabled:
+            return
+
+        previous_entries = _previous_progress_entries(previous_progress)
+        current_keys = set()
+        for entry_plan in dataset.entry_plans:
+            entry_key = _entry_progress_key(entry_plan)
+            if entry_key in current_keys:
+                raise ValueError(
+                    f"manifest 包含重复数据集路径，无法按 JSONL 文件维护进度: {entry_plan.path}"
+                )
+            current_keys.add(entry_key)
+            active = int(entry_plan.selected_count) > 0
+            template = _build_entry_progress_template(entry_plan, config, active=active)
+            previous_entry = previous_entries.get(entry_key)
+            if not active:
+                inactive = dict(template)
+                if previous_entry:
+                    for key in (
+                        "completed_epochs",
+                        "consumed_in_current_epoch",
+                        "total_consumed_samples",
+                        "consumed_ordinals_in_current_epoch",
+                    ):
+                        if key in previous_entry:
+                            inactive[key] = previous_entry[key]
+                inactive["active"] = False
+                inactive["skip_reason"] = "weight_zero_or_empty"
+                self.inactive_entries[entry_key] = inactive
+                continue
+
+            _validate_resume_entry_progress(template, previous_entry)
+            consumed_ordinals = []
+            completed_epochs = 0
+            if previous_entry:
+                completed_epochs = min(
+                    int(previous_entry.get("completed_epochs", 0) or 0),
+                    self.target_total_epochs,
+                )
+                if completed_epochs < self.target_total_epochs:
+                    raw_ordinals = previous_entry.get("consumed_ordinals_in_current_epoch", [])
+                    if not isinstance(raw_ordinals, list):
+                        raw_ordinals = []
+                    consumed_ordinals = sorted(
+                        {
+                            int(value)
+                            for value in raw_ordinals
+                            if 0 <= int(value) < int(template["planned_sample_count_per_epoch"])
+                        }
+                    )
+            template["completed_epochs"] = completed_epochs
+            template["consumed_ordinals_in_current_epoch"] = consumed_ordinals
+            template["consumed_in_current_epoch"] = len(consumed_ordinals)
+            template["total_consumed_samples"] = (
+                completed_epochs * int(template["planned_sample_count_per_epoch"])
+                + len(consumed_ordinals)
+            )
+            self.entries[entry_key] = template
+
+        for entry_key, previous_entry in previous_entries.items():
+            if entry_key in current_keys:
+                continue
+            inactive = dict(previous_entry)
+            inactive["active"] = False
+            inactive["skip_reason"] = "not_in_current_manifest"
+            self.inactive_entries[entry_key] = inactive
+
+    def attach_epoch(self, sample, epoch_index):
+        """把当前训练 epoch 写入样本进度元数据。"""
+        meta = sample.get(DATA_PROGRESS_RECORD_KEY) if isinstance(sample, dict) else None
+        if not isinstance(meta, dict):
+            return sample
+        enriched_sample = dict(sample)
+        enriched_meta = dict(meta)
+        enriched_meta["epoch_index"] = int(epoch_index)
+        enriched_sample[DATA_PROGRESS_RECORD_KEY] = enriched_meta
+        return enriched_sample
+
+    def should_train(self, sample):
+        """判断样本是否还需要训练。"""
+        meta = sample.get(DATA_PROGRESS_RECORD_KEY) if isinstance(sample, dict) else None
+        if not isinstance(meta, dict):
+            return True
+        entry = self.entries.get(meta.get("entry_key"))
+        if not entry or not entry.get("active", False):
+            return False
+        if int(entry["planned_sample_count_per_epoch"]) <= 0:
+            return False
+        completed_epochs = int(entry.get("completed_epochs", 0))
+        if completed_epochs >= self.target_total_epochs:
+            return False
+        epoch_index = int(meta.get("epoch_index", 0))
+        if epoch_index >= self.target_total_epochs:
+            return False
+        if epoch_index < completed_epochs:
+            return False
+        if epoch_index > completed_epochs:
+            return True
+        consumed = set(entry.get("consumed_ordinals_in_current_epoch", []))
+        return int(meta.get("sample_ordinal", -1)) not in consumed
+
+    def update_after_batch(self, samples):
+        """训练 batch 成功后更新每个 entry 的当前 epoch 进度。"""
+        if not self.enabled:
+            return
+        touched = set()
+        for sample in samples:
+            meta = sample.get(DATA_PROGRESS_RECORD_KEY) if isinstance(sample, dict) else None
+            if not isinstance(meta, dict):
+                continue
+            entry = self.entries.get(meta.get("entry_key"))
+            if not entry or not entry.get("active", False):
+                continue
+            epoch_index = int(meta.get("epoch_index", 0))
+            while int(entry.get("completed_epochs", 0)) < epoch_index:
+                entry["completed_epochs"] = int(entry.get("completed_epochs", 0)) + 1
+                entry["consumed_ordinals_in_current_epoch"] = []
+            if int(entry.get("completed_epochs", 0)) != epoch_index:
+                continue
+            ordinal = int(meta.get("sample_ordinal", -1))
+            if ordinal < 0:
+                continue
+            consumed = set(entry.get("consumed_ordinals_in_current_epoch", []))
+            consumed.add(ordinal)
+            entry["consumed_ordinals_in_current_epoch"] = sorted(consumed)
+            touched.add(meta.get("entry_key"))
+
+        for entry_key in touched:
+            entry = self.entries[entry_key]
+            planned_count = int(entry["planned_sample_count_per_epoch"])
+            consumed_count = len(entry.get("consumed_ordinals_in_current_epoch", []))
+            if planned_count > 0 and consumed_count >= planned_count:
+                entry["completed_epochs"] = min(
+                    self.target_total_epochs,
+                    int(entry.get("completed_epochs", 0)) + 1,
+                )
+                entry["consumed_ordinals_in_current_epoch"] = []
+                consumed_count = 0
+            entry["consumed_in_current_epoch"] = consumed_count
+            entry["total_consumed_samples"] = (
+                int(entry.get("completed_epochs", 0)) * planned_count + consumed_count
+            )
+
+    def remaining_samples(self):
+        """返回当前活跃 manifest 中仍需训练的样本实例数。"""
+        remaining = 0
+        for entry in self.entries.values():
+            target_total = int(entry["target_total_samples"])
+            consumed = int(entry.get("total_consumed_samples", 0))
+            remaining += max(0, target_total - consumed)
+        return remaining
+
+    def remaining_batches(self, batch_size):
+        """按当前 batch size 估算剩余 batch 数。"""
+        remaining = self.remaining_samples()
+        if remaining <= 0:
+            return 0
+        return math.ceil(remaining / int(batch_size))
+
+    def summary(self):
+        """生成写入 trainer_state 的数据进度摘要。"""
+        if not self.enabled:
+            return None
+        return {
+            "schema_version": DATA_PROGRESS_SCHEMA_VERSION,
+            "path": DATA_PROGRESS_NAME,
+            "manifest_path": None if self.manifest_path is None else _progress_path_string(self.manifest_path),
+            "active_entry_count": len(self.entries),
+            "inactive_entry_count": len(self.inactive_entries),
+            "remaining_samples": self.remaining_samples(),
+            "entries": [
+                {
+                    "entry_name": entry["entry_name"],
+                    "path": entry["path"],
+                    "active": bool(entry.get("active", False)),
+                    "completed_epochs": int(entry.get("completed_epochs", 0)),
+                    "consumed_in_current_epoch": int(entry.get("consumed_in_current_epoch", 0)),
+                    "total_consumed_samples": int(entry.get("total_consumed_samples", 0)),
+                    "target_total_samples": int(entry.get("target_total_samples", 0)),
+                }
+                for entry in sorted(self.entries.values(), key=lambda value: value["entry_key"])
+            ],
+        }
+
+    def to_payload(self, config, *, global_step, optimizer_step, samples_seen, tokens_seen):
+        """生成完整 data_progress.json 内容。"""
+        if not self.enabled:
+            return None
+        entries = []
+        for entry in sorted(self.entries.values(), key=lambda value: value["entry_key"]):
+            normalized = dict(entry)
+            normalized["consumed_ordinals_in_current_epoch"] = list(
+                normalized.get("consumed_ordinals_in_current_epoch", [])
+            )
+            entries.append(normalized)
+        for entry in sorted(self.inactive_entries.values(), key=lambda value: value.get("entry_key", "")):
+            normalized = dict(entry)
+            normalized["active"] = False
+            entries.append(normalized)
+        return {
+            "schema_version": DATA_PROGRESS_SCHEMA_VERSION,
+            "training_stage": config.training_stage,
+            "run_id": config.run_id,
+            "global_step": int(global_step),
+            "optimizer_step": int(optimizer_step),
+            "samples_seen": int(samples_seen),
+            "tokens_seen": int(tokens_seen),
+            "target_total_epochs": self.target_total_epochs,
+            "batch_size": int(config.batch_size),
+            "seed": int(config.seed),
+            "manifest_path": None if self.manifest_path is None else _progress_path_string(self.manifest_path),
+            "source_manifest": None if config.source_manifest is None else _progress_path_string(config.source_manifest),
+            "active_entry_count": len(self.entries),
+            "inactive_entry_count": len(self.inactive_entries),
+            "remaining_samples": self.remaining_samples(),
+            "entries": entries,
+        }
+
+
+def _build_progress_batch_iterator(dataset, *, batch_size, epochs, max_steps=None, progress_tracker=None):
+    """按数据进度过滤已训练样本，再组织为 batch。"""
+    max_steps = None if max_steps is None else int(max_steps)
+    if max_steps is not None and max_steps <= 0:
+        return
+    produced_batches = 0
+    for epoch_index in range(max(1, int(epochs))):
+        bucket = []
+        if progress_tracker is not None and progress_tracker.enabled and hasattr(dataset, "iter_records_for_epoch"):
+            sample_iterator = dataset.iter_records_for_epoch(epoch_index)
+        else:
+            sample_iterator = iter(dataset)
+        for sample in sample_iterator:
+            if progress_tracker is not None and progress_tracker.enabled:
+                sample = progress_tracker.attach_epoch(sample, epoch_index)
+                if not progress_tracker.should_train(sample):
+                    continue
+            bucket.append(sample)
+            if len(bucket) < batch_size:
+                continue
+            yield bucket
+            produced_batches += 1
+            bucket = []
+            if max_steps is not None and produced_batches >= max_steps:
+                return
+        if bucket:
+            yield bucket
+            produced_batches += 1
+            if max_steps is not None and produced_batches >= max_steps:
+                return
+
+
+def _resolve_progress_training_budget(dataset, config, progress_tracker, global_step):
+    """结合数据进度和 max_steps 计算本次续训剩余 batch 数。"""
+    if progress_tracker is not None and progress_tracker.enabled:
+        remaining_batches = progress_tracker.remaining_batches(config.batch_size)
+        if config.max_steps is not None:
+            remaining_batches = min(
+                remaining_batches,
+                _resolve_remaining_batch_budget(int(config.max_steps), global_step),
+            )
+        total_budget = int(global_step) + int(remaining_batches)
+        return total_budget, remaining_batches
+
+    total_budget = _resolve_training_batch_budget(dataset, config)
+    return total_budget, _resolve_remaining_batch_budget(total_budget, global_step)
 
 
 def _build_batch_tensors(samples, tokenizer, config, rng=None):
@@ -916,6 +1345,31 @@ def _save_trainer_state(checkpoint_root, state):
     atomic_write_text(state_path, json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _save_data_progress(checkpoint_root, data_progress):
+    """保存 data_progress.json，记录每个 manifest entry 的续训进度。"""
+    if data_progress is None:
+        return None
+    progress_path = _data_progress_file(checkpoint_root)
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    return atomic_write_text(
+        progress_path,
+        json.dumps(data_progress, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _save_artifact_data_progress_snapshot(config, data_progress):
+    """在 artifact/config 下保存 latest 数据进度快照，方便人工审计。"""
+    if data_progress is None:
+        return None
+    snapshot_path = Path(config.artifact_dir) / "config" / DATA_PROGRESS_NAME
+    return atomic_write_text(
+        snapshot_path,
+        json.dumps(data_progress, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def _build_checkpoint_manifest(checkpoint_root, config, trainer_state, file_names):
     """构造 checkpoint_manifest，用于发布前后完整性校验。"""
     return {
@@ -986,7 +1440,17 @@ def _cleanup_checkpoint_root(path):
         pass
 
 
-def _save_checkpoint(model, optimizer, scheduler, config, trainer_state, *, is_latest=True, checkpoint_root=None):
+def _save_checkpoint(
+    model,
+    optimizer,
+    scheduler,
+    config,
+    trainer_state,
+    *,
+    is_latest=True,
+    checkpoint_root=None,
+    data_progress=None,
+):
     """保存训练 checkpoint，并在暂存目录校验通过后发布。"""
     checkpoint_root = Path(config.checkpoint_dir) if checkpoint_root is None else Path(checkpoint_root)
     if not is_latest:
@@ -1019,6 +1483,9 @@ def _save_checkpoint(model, optimizer, scheduler, config, trainer_state, *, is_l
             file_names.append(SCHEDULER_CHECKPOINT_NAME)
         _save_trainer_state(staging_root, trainer_state)
         file_names.append(TRAINER_STATE_NAME)
+        if data_progress is not None:
+            _save_data_progress(staging_root, data_progress)
+            file_names.append(DATA_PROGRESS_NAME)
         _save_checkpoint_manifest(staging_root, config, trainer_state, file_names)
         if not _is_valid_training_checkpoint_root(
             staging_root,
@@ -1029,6 +1496,8 @@ def _save_checkpoint(model, optimizer, scheduler, config, trainer_state, *, is_l
         # 只有暂存目录自校验通过，才发布为 latest/step，避免中断进程留下半成品。
         _publish_checkpoint_root(staging_root, checkpoint_root, rotate_existing=bool(is_latest))
         model.config.save_json(Path(config.artifact_dir) / "config" / "model_config.json")
+        if data_progress is not None and Path(checkpoint_root) == Path(config.checkpoint_dir):
+            _save_artifact_data_progress_snapshot(config, data_progress)
         return checkpoint_root
     except Exception:
         _cleanup_checkpoint_root(staging_root)
@@ -1127,6 +1596,7 @@ def _build_trainer_state(
     current_learning_rate=None,
     last_eval_metric=None,
     optimizer_group_summary=None,
+    data_progress_summary=None,
 ):
     """生成 trainer_state，覆盖续训、报告和 checkpoint metadata 需要的字段。"""
     latest_eval_loss = None
@@ -1161,6 +1631,7 @@ def _build_trainer_state(
         "key_checkpoints": list(config.key_checkpoints),
         "longrope2_training_strategy": _build_longrope2_training_strategy(config),
         "optimizer_group_summary": optimizer_group_summary,
+        "data_progress": data_progress_summary,
         "tokenizer_metadata": dict(config.tokenizer_metadata or {}),
         "training_config": _serialize_training_config(config),
     }
@@ -1200,36 +1671,51 @@ def train(
         learning_rate=config.learning_rate,
         weight_decay=config.weight_decay,
     )
-    training_batch_budget = _resolve_training_batch_budget(dataset, config)
-    scheduler = _build_scheduler(
-        optimizer,
-        total_steps=training_batch_budget,
-        warmup_ratio=config.warmup_ratio,
-    )
-    tensorboard_writer = _build_tensorboard_writer(config)
-    length_rng = random.Random(int(config.seed) + 7919)
-
     global_step = 0
     optimizer_step = 0
     samples_seen = 0
     tokens_seen = 0
     best_checkpoint_value = None
     best_checkpoint_global_step = None
+    resume_checkpoint = None
+    resume_state = {}
     if config.resume_checkpoint and has_complete_training_state(
         config.resume_checkpoint,
         lora_mode=config.lora_mode,
     ):
         # resume 只在完整训练状态存在时启用；缺 optimizer 的目录不会被当作可续训来源。
-        state = load_trainer_state(config.resume_checkpoint)
-        global_step = int(state.get("global_step", 0))
-        optimizer_step = int(state.get("optimizer_step", 0))
-        samples_seen = int(state.get("samples_seen", 0))
-        tokens_seen = int(state.get("tokens_seen", 0))
-        best_checkpoint = state.get("best_checkpoint")
+        resume_checkpoint = config.resume_checkpoint
+        resume_state = load_trainer_state(resume_checkpoint)
+        global_step = int(resume_state.get("global_step", 0))
+        optimizer_step = int(resume_state.get("optimizer_step", 0))
+        samples_seen = int(resume_state.get("samples_seen", 0))
+        tokens_seen = int(resume_state.get("tokens_seen", 0))
+        best_checkpoint = resume_state.get("best_checkpoint")
         if isinstance(best_checkpoint, dict) and best_checkpoint.get("metric") == config.best_checkpoint_metric:
             best_checkpoint_value = best_checkpoint.get("value")
             best_checkpoint_global_step = best_checkpoint.get("global_step")
-        _load_optimizer_scheduler_state(config.resume_checkpoint, optimizer, scheduler)
+
+    previous_data_progress = load_data_progress(resume_checkpoint) if resume_checkpoint is not None else None
+    data_progress_tracker = DataProgressTracker(
+        dataset,
+        config,
+        previous_progress=previous_data_progress,
+    )
+    training_batch_budget, remaining_steps = _resolve_progress_training_budget(
+        dataset,
+        config,
+        data_progress_tracker,
+        global_step,
+    )
+    scheduler = _build_scheduler(
+        optimizer,
+        total_steps=training_batch_budget,
+        warmup_ratio=config.warmup_ratio,
+    )
+    if resume_checkpoint is not None:
+        _load_optimizer_scheduler_state(resume_checkpoint, optimizer, scheduler)
+    tensorboard_writer = _build_tensorboard_writer(config)
+    length_rng = random.Random(int(config.seed) + 7919)
 
     start_time = time()
     accumulated_steps = 0
@@ -1239,14 +1725,14 @@ def train(
     last_eval_metric = None
     saved_step_checkpoints = set()
     try:
-        remaining_steps = _resolve_remaining_batch_budget(training_batch_budget, global_step)
         progress_total = remaining_steps
         batch_iterator = (
-            _batch_iterator(
+            _build_progress_batch_iterator(
                 dataset,
                 batch_size=config.batch_size,
                 epochs=config.epochs,
                 max_steps=remaining_steps,
+                progress_tracker=data_progress_tracker,
             )
             if remaining_steps is None or remaining_steps > 0
             else ()
@@ -1278,6 +1764,7 @@ def train(
             samples_seen += int(batch["sample_count"])
             tokens_seen += int(batch["attention_mask"].sum().item())
             last_loss = float(loss.detach().cpu())
+            data_progress_tracker.update_after_batch(samples)
             cuda_memory_metrics = _collect_cuda_memory_metrics(device)
 
             if accumulated_steps >= int(config.gradient_accumulation_steps):
@@ -1359,6 +1846,14 @@ def train(
                 current_learning_rate=optimizer.param_groups[0]["lr"],
                 last_eval_metric=last_eval_metric,
                 optimizer_group_summary=optimizer_group_summary,
+                data_progress_summary=data_progress_tracker.summary(),
+            )
+            data_progress_payload = data_progress_tracker.to_payload(
+                config,
+                global_step=global_step,
+                optimizer_step=optimizer_step,
+                samples_seen=samples_seen,
+                tokens_seen=tokens_seen,
             )
 
             should_save_latest = bool(
@@ -1398,6 +1893,7 @@ def train(
                         config,
                         trainer_state,
                         checkpoint_root=_best_checkpoint_root(config),
+                        data_progress=data_progress_payload,
                     )
             _attach_best_checkpoint_state(
                 config,
@@ -1406,10 +1902,26 @@ def train(
                 best_global_step=best_checkpoint_global_step,
             )
             if (should_save_step or should_save_key) and int(global_step) not in saved_step_checkpoints:
-                _save_checkpoint(model, optimizer, scheduler, config, trainer_state, is_latest=False)
+                _save_checkpoint(
+                    model,
+                    optimizer,
+                    scheduler,
+                    config,
+                    trainer_state,
+                    is_latest=False,
+                    data_progress=data_progress_payload,
+                )
                 saved_step_checkpoints.add(int(global_step))
             if should_save_latest:
-                _save_checkpoint(model, optimizer, scheduler, config, trainer_state, is_latest=True)
+                _save_checkpoint(
+                    model,
+                    optimizer,
+                    scheduler,
+                    config,
+                    trainer_state,
+                    is_latest=True,
+                    data_progress=data_progress_payload,
+                )
 
         if accumulated_steps > 0:
             # 数据集尾部不足一个 gradient_accumulation_steps 时，也要把残余梯度提交一次。
@@ -1444,6 +1956,14 @@ def train(
         current_learning_rate=optimizer.param_groups[0]["lr"],
         last_eval_metric=last_eval_metric,
         optimizer_group_summary=optimizer_group_summary,
+        data_progress_summary=data_progress_tracker.summary(),
+    )
+    data_progress_payload = data_progress_tracker.to_payload(
+        config,
+        global_step=global_step,
+        optimizer_step=optimizer_step,
+        samples_seen=samples_seen,
+        tokens_seen=tokens_seen,
     )
     if last_grad_norm is not None:
         trainer_state["last_grad_norm"] = last_grad_norm
@@ -1469,6 +1989,7 @@ def train(
                 config,
                 trainer_state,
                 checkpoint_root=_best_checkpoint_root(config),
+                data_progress=data_progress_payload,
             )
     _attach_best_checkpoint_state(
         config,
@@ -1476,7 +1997,15 @@ def train(
         best_value=best_checkpoint_value,
         best_global_step=best_checkpoint_global_step,
     )
-    _save_checkpoint(model, optimizer, scheduler, config, trainer_state, is_latest=True)
+    _save_checkpoint(
+        model,
+        optimizer,
+        scheduler,
+        config,
+        trainer_state,
+        is_latest=True,
+        data_progress=data_progress_payload,
+    )
     if config.save_inference_weights:
         _save_inference_weight(model, config, trainer_state)
     return trainer_state

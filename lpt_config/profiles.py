@@ -42,6 +42,8 @@ def build_lpt_v2_profile_config(profile_name, *, preset=DEFAULT_MODEL_SIZE_PRESE
             {
                 "cache_backend": DENSE_KV_CACHE_BACKEND,
                 "retnet_assist_enabled": False,
+                "retnet_assist_layers": "disabled",
+                "retnet_context_adapter_enabled": False,
                 "moe_num_experts": 1,
                 "moe_top_k": 1,
             }
@@ -53,6 +55,8 @@ def build_lpt_v2_profile_config(profile_name, *, preset=DEFAULT_MODEL_SIZE_PRESE
             {
                 "cache_backend": DENSE_KV_CACHE_BACKEND,
                 "retnet_assist_enabled": False,
+                "retnet_assist_layers": "disabled",
+                "retnet_context_adapter_enabled": False,
             }
         )
         _with_memory_disabled(payload)
@@ -62,16 +66,18 @@ def build_lpt_v2_profile_config(profile_name, *, preset=DEFAULT_MODEL_SIZE_PRESE
             {
                 "cache_backend": PAGED_KV_CACHE_BACKEND,
                 "retnet_assist_enabled": False,
+                "retnet_assist_layers": "disabled",
+                "retnet_context_adapter_enabled": False,
             }
         )
         _with_memory_disabled(payload)
     elif profile == LPT_V2_ASSIST_PROFILE:
-        # Assist profile 是默认主线：启用 Paged KV 与全层 RetNetAssist，但仍关闭 xLSTMAssist。
+        # Assist profile 是默认主线：启用 Paged KV 与 every_4_layers RetNetAssist，但仍关闭 xLSTMAssist。
         payload.update(
             {
                 "cache_backend": PAGED_KV_CACHE_BACKEND,
                 "retnet_assist_enabled": True,
-                "retnet_assist_layers": "all_layers",
+                "retnet_assist_layers": "every_4_layers",
             }
         )
         _with_memory_disabled(payload)
@@ -81,7 +87,7 @@ def build_lpt_v2_profile_config(profile_name, *, preset=DEFAULT_MODEL_SIZE_PRESE
             {
                 "cache_backend": PAGED_KV_CACHE_BACKEND,
                 "retnet_assist_enabled": True,
-                "retnet_assist_layers": "all_layers",
+                "retnet_assist_layers": "every_4_layers",
                 "moe_num_experts": 8,
                 "moe_top_k": 2,
             }
@@ -93,11 +99,11 @@ def build_lpt_v2_profile_config(profile_name, *, preset=DEFAULT_MODEL_SIZE_PRESE
             {
                 "cache_backend": PAGED_KV_CACHE_BACKEND,
                 "retnet_assist_enabled": True,
-                "retnet_assist_layers": "all_layers",
+                "retnet_assist_layers": "every_4_layers",
                 "moe_num_experts": 8,
                 "moe_top_k": 2,
                 "xlstm_memory_enabled": True,
-                "xlstm_memory_layers": "every_n_layers",
+                "xlstm_memory_layers": "every_4_layers",
                 "moe_router_input_mode": "memory_augmented_input",
             }
         )
