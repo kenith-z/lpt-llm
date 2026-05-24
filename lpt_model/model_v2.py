@@ -1048,6 +1048,17 @@ class LPTV2(nn.Module):
             raise ValueError("LPTV2 只接受 architecture_version='lpt_v2' 的 ModelConfig。")
         self.vocabulary_size = int(vocabulary_size)
         self.token_embedding = nn.Embedding(self.vocabulary_size, self.config.hidden_size)
+        self.thinking_mode_embedding = nn.Embedding(
+            int(self.config.thinking_mode_count),
+            self.config.hidden_size,
+        )
+        self.thinking_channel_embedding = nn.Embedding(
+            int(self.config.thinking_channel_count),
+            self.config.hidden_size,
+        )
+        # 原生 thinking 控制从零扰动开始，避免新控制张量在未训练前随机改变基座行为。
+        nn.init.zeros_(self.thinking_mode_embedding.weight)
+        nn.init.zeros_(self.thinking_channel_embedding.weight)
         self.paged_kv_cache = PagedKVCache(
             page_block_size=self.config.page_block_size,
             attention_window_size=self.config.attention_window_size,
@@ -1189,12 +1200,28 @@ class LPTV2(nn.Module):
             states_by_slot[state_slot] = layer_state.retnet_assist
         return states_by_slot
 
+    def _normalize_control_ids(self, ids, *, reference, embedding, name):
+        """把 thinking 控制 id 规范化到输入同形状，并做范围检查。"""
+        if ids is None:
+            return torch.zeros_like(reference, dtype=torch.long)
+        normalized = ids.to(device=reference.device, dtype=torch.long)
+        if normalized.shape != reference.shape:
+            raise ValueError(f"{name} 形状必须与 input_ids 一致。")
+        if normalized.numel() and (
+            int(normalized.min().item()) < 0
+            or int(normalized.max().item()) >= int(embedding.num_embeddings)
+        ):
+            raise ValueError(f"{name} 包含超出 embedding 范围的 id。")
+        return normalized
+
     def forward(
         self,
         input_ids,
         position_ids=None,
         attention_mask=None,
         segment_ids=None,
+        thinking_mode_ids=None,
+        target_channel_ids=None,
         memory_boundary_metadata=None,
         session_event=None,
         layer_states=None,
@@ -1215,9 +1242,24 @@ class LPTV2(nn.Module):
             position_ids = position_ids.to(device=embedding_device, dtype=torch.long)
         if segment_ids is not None:
             segment_ids = segment_ids.to(device=embedding_device, dtype=torch.long)
+        thinking_mode_ids = self._normalize_control_ids(
+            thinking_mode_ids,
+            reference=input_ids,
+            embedding=self.thinking_mode_embedding,
+            name="thinking_mode_ids",
+        )
+        target_channel_ids = self._normalize_control_ids(
+            target_channel_ids,
+            reference=input_ids,
+            embedding=self.thinking_channel_embedding,
+            name="target_channel_ids",
+        )
 
         rope_cache = self.get_rope_cache(rope_cache_scope)
-        hidden_states = self.token_embedding(input_ids)
+        hidden_states = (
+            self.token_embedding(input_ids)
+            + self.thinking_mode_embedding(thinking_mode_ids)
+        )
         previous_states = self._normalize_incoming_layer_states(layer_states)
         previous_retnet_states = self._collect_retnet_previous_states(previous_states)
         new_states = []
@@ -1264,6 +1306,8 @@ class LPTV2(nn.Module):
         lm_head_device = self.lm_head.weight.device
         if normalized_states.device != lm_head_device:
             normalized_states = normalized_states.to(device=lm_head_device)
+        target_channel_ids = target_channel_ids.to(device=lm_head_device, dtype=torch.long)
+        normalized_states = normalized_states + self.thinking_channel_embedding(target_channel_ids)
         logits = self.lm_head(normalized_states)
         return logits, tuple(new_states)
 
@@ -1273,6 +1317,8 @@ class LPTV2(nn.Module):
         position_ids=None,
         attention_mask=None,
         segment_ids=None,
+        thinking_mode_ids=None,
+        target_channel_ids=None,
         memory_boundary_metadata=None,
         session_event=None,
         rope_cache_scope="inference",
@@ -1284,6 +1330,8 @@ class LPTV2(nn.Module):
             position_ids=position_ids,
             attention_mask=attention_mask,
             segment_ids=segment_ids,
+            thinking_mode_ids=thinking_mode_ids,
+            target_channel_ids=target_channel_ids,
             memory_boundary_metadata=memory_boundary_metadata,
             session_event=session_event,
             layer_states=None,
@@ -1308,6 +1356,8 @@ class LPTV2(nn.Module):
         position_ids=None,
         attention_mask=None,
         segment_ids=None,
+        thinking_mode_ids=None,
+        target_channel_ids=None,
         memory_boundary_metadata=None,
         session_event=None,
         layer_states=None,
@@ -1328,6 +1378,8 @@ class LPTV2(nn.Module):
             position_ids=position_ids,
             attention_mask=attention_mask,
             segment_ids=segment_ids,
+            thinking_mode_ids=thinking_mode_ids,
+            target_channel_ids=target_channel_ids,
             memory_boundary_metadata=memory_boundary_metadata,
             session_event=session_event,
             layer_states=pooled_layer_states,

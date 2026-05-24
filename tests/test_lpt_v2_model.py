@@ -48,6 +48,23 @@ class TestLPTV2Model(unittest.TestCase):
         self.assertEqual(states[0].retnet_assist.token_count, 4)
         self.assertEqual(sum(states[0].moe.expert_token_counts), 4)
 
+    def test_lpt_v2_accepts_native_thinking_control_tensors(self):
+        model = LPTV2(32, build_tiny_v2_config())
+        input_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+        thinking_mode_ids = torch.tensor([[0, 0, 1, 1]], dtype=torch.long)
+        target_channel_ids = torch.tensor([[0, 1, 1, 2]], dtype=torch.long)
+
+        logits, states = model(
+            input_ids,
+            thinking_mode_ids=thinking_mode_ids,
+            target_channel_ids=target_channel_ids,
+        )
+
+        self.assertEqual(tuple(logits.shape), (1, 4, 32))
+        self.assertEqual(len(states), 2)
+        with self.assertRaises(ValueError):
+            model(input_ids, thinking_mode_ids=torch.tensor([[0, 1]], dtype=torch.long))
+
     def test_lpt_v2_decode_uses_full_attention_mask_tail(self):
         model = LPTV2(32, build_tiny_v2_config())
         _, prefill_states = model(

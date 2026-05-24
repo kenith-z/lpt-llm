@@ -109,8 +109,8 @@ class TestConvertPdfTextDataset(unittest.TestCase):
     def test_convert_pdf_directory_skips_image_only_pdf(self):
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT) as temp_dir:
             temp_root = Path(temp_dir)
-            pending_dir = temp_root / "data" / "pending-data" / "pdf"
-            archive_root = temp_root / "data" / "old-data"
+            pending_dir = temp_root / "data" / "z-pending-data" / "pdf"
+            archive_root = temp_root / "data" / "z-old-data"
             output_path = temp_root / "data" / "structured" / "text_pretrain" / "pdf.text.jsonl"
             text_pdf = pending_dir / "text.pdf"
             image_pdf = pending_dir / "image.pdf"
@@ -146,8 +146,8 @@ class TestConvertPdfTextDataset(unittest.TestCase):
     def test_convert_pdf_directory_persists_each_file_before_next_pdf(self):
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT) as temp_dir:
             temp_root = Path(temp_dir)
-            pending_dir = temp_root / "data" / "pending-data" / "pdf"
-            archive_root = temp_root / "data" / "old-data"
+            pending_dir = temp_root / "data" / "z-pending-data" / "pdf"
+            archive_root = temp_root / "data" / "z-old-data"
             output_path = temp_root / "data" / "structured" / "text_pretrain" / "pdf.text.jsonl"
             first_pdf = pending_dir / "first.pdf"
             second_pdf = pending_dir / "second.pdf"
@@ -183,7 +183,7 @@ class TestConvertPdfTextDataset(unittest.TestCase):
     def test_convert_pdf_directory_appends_to_existing_jsonl(self):
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT) as temp_dir:
             temp_root = Path(temp_dir)
-            pending_dir = temp_root / "data" / "pending-data" / "pdf"
+            pending_dir = temp_root / "data" / "z-pending-data" / "pdf"
             output_path = temp_root / "data" / "structured" / "text_pretrain" / "pdf.text.jsonl"
             _write_dummy_pdf(pending_dir / "append.pdf")
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -220,7 +220,7 @@ class TestConvertPdfTextDataset(unittest.TestCase):
     def test_convert_pdf_directory_chunks_by_train_max_sequence_length(self):
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT) as temp_dir:
             temp_root = Path(temp_dir)
-            pending_dir = temp_root / "data" / "pending-data" / "pdf"
+            pending_dir = temp_root / "data" / "z-pending-data" / "pdf"
             output_path = temp_root / "data" / "structured" / "text_pretrain" / "pdf.text.jsonl"
             _write_dummy_pdf(pending_dir / "long.pdf")
 

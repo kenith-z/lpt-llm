@@ -389,6 +389,10 @@ def apply_inference_execution_plan(model, execution_plan):
     primary_device = torch.device(plan.primary_device)
     # embedding 与 lm_head 共享权重，因此两者必须放在同一主设备上。
     model.token_embedding.to(primary_device)
+    if hasattr(model, "thinking_mode_embedding"):
+        model.thinking_mode_embedding.to(primary_device)
+    if hasattr(model, "thinking_channel_embedding"):
+        model.thinking_channel_embedding.to(primary_device)
     model._rope_caches.to(primary_device)
     for layer, device_name in zip(model.layers, plan.layer_devices):
         # 当前模型的 forward 会在层边界迁移 hidden_states，故可以按 block 粒度放置。

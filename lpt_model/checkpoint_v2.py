@@ -60,6 +60,14 @@ def _state_schema_metadata(config):
             "kv_cache_scope": config.kv_cache_scope,
             "page_block_size": config.page_block_size,
         },
+        "thinking_control": {
+            "schema_version": int(config.thinking_control_schema_version),
+            "enabled": bool(config.thinking_control_enabled),
+            "mode_count": int(config.thinking_mode_count),
+            "channel_count": int(config.thinking_channel_count),
+            "control_source": "structured_tensor",
+            "legacy_text_tags_supported": False,
+        },
         "retnet_assist_state": {
             "state_type": "retnet_assist_state",
             "state_dim": config.retnet_state_dim,

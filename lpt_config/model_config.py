@@ -17,7 +17,7 @@ from .constants import (
 
 
 # 当前支持的 ModelConfig JSON schema 版本；checkpoint 加载时必须严格匹配。
-MODEL_CONFIG_SCHEMA_VERSION = 2
+MODEL_CONFIG_SCHEMA_VERSION = 3
 # LPT v2 独立分支架构标识，是 v2 checkpoint 与配置的主入口。
 LPT_V2_ARCHITECTURE_VERSION = "lpt_v2"
 # LPT v2 block 类型，约束每层使用 Attention 主干 + RetNetAssist Q adapter。
@@ -79,6 +79,10 @@ LONGROPE2_EMBEDDING_MODES = (
     LONGROPE2_DYNAMIC_EMBEDDING_MODE,
     LONGROPE2_MIXED_EMBEDDING_MODE,
 )
+# 原生 Thinking 控制 schema。mode: off/on/auto，channel: prompt/thinking/answer。
+THINKING_CONTROL_SCHEMA_VERSION = 1
+THINKING_MODE_COUNT = 3
+THINKING_CHANNEL_COUNT = 3
 # 默认 v2 tiny 层类型布局；v2 主干全部是 Attention block。
 DEFAULT_LAYER_BLOCK_TYPES = (
     ATTENTION_BLOCK_TYPE,
@@ -311,6 +315,14 @@ class ModelConfig:
     kv_cache_scope: str = "local_real_tokens_only"
     # Paged KV 单个 page/block 包含的 token 数。
     page_block_size: int = 256
+    # 原生 Thinking 控制开关；通过结构化张量控制，不依赖自然文本标签。
+    thinking_control_enabled: bool = True
+    # 原生 Thinking 控制 schema 版本，便于 checkpoint 审计。
+    thinking_control_schema_version: int = THINKING_CONTROL_SCHEMA_VERSION
+    # thinking mode 数量：off/on/auto。
+    thinking_mode_count: int = THINKING_MODE_COUNT
+    # 目标输出通道数量：prompt/thinking/answer。
+    thinking_channel_count: int = THINKING_CHANNEL_COUNT
     # RetNetAssist 基础开关；第 24/25/26/27 项都以启用该全局摘要为前提。
     retnet_assist_enabled: bool = True
     # 第 24 项：RetNetAssist 作用模式；主线默认 Q adapter，Q/K adapter 只作为归档对照。
@@ -496,6 +508,10 @@ class ModelConfig:
         object.__setattr__(self, "cache_backend", str(self.cache_backend))
         object.__setattr__(self, "kv_cache_scope", str(self.kv_cache_scope))
         object.__setattr__(self, "page_block_size", int(self.page_block_size))
+        object.__setattr__(self, "thinking_control_enabled", bool(self.thinking_control_enabled))
+        object.__setattr__(self, "thinking_control_schema_version", int(self.thinking_control_schema_version))
+        object.__setattr__(self, "thinking_mode_count", int(self.thinking_mode_count))
+        object.__setattr__(self, "thinking_channel_count", int(self.thinking_channel_count))
         object.__setattr__(self, "retnet_assist_enabled", bool(self.retnet_assist_enabled))
         object.__setattr__(self, "retnet_assist_mode", str(self.retnet_assist_mode))
         object.__setattr__(self, "retnet_assist_layers", str(self.retnet_assist_layers))
@@ -768,6 +784,14 @@ class ModelConfig:
             raise ValueError("page_block_size 必须为正整数。")
         if self.kv_cache_scope != "local_real_tokens_only":
             raise ValueError("kv_cache_scope 当前必须是 local_real_tokens_only。")
+        if self.thinking_control_schema_version != THINKING_CONTROL_SCHEMA_VERSION:
+            raise ValueError(
+                f"thinking_control_schema_version 必须是 {THINKING_CONTROL_SCHEMA_VERSION}。"
+            )
+        if self.thinking_mode_count < THINKING_MODE_COUNT:
+            raise ValueError(f"thinking_mode_count 至少为 {THINKING_MODE_COUNT}。")
+        if self.thinking_channel_count < THINKING_CHANNEL_COUNT:
+            raise ValueError(f"thinking_channel_count 至少为 {THINKING_CHANNEL_COUNT}。")
 
         if self.retnet_assist_mode not in {"q_adapter", "qk_adapter"}:
             raise ValueError("retnet_assist_mode 必须是 q_adapter 或 qk_adapter。")

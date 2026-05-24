@@ -43,6 +43,7 @@ from lpt_config import (
 from lpt_data import DATA_PROGRESS_RECORD_KEY, build_packed_training_batch, build_training_batch
 from lpt_lora import save_lora_adapter_state
 from lpt_model import save_lpt_v2_checkpoint
+from lpt_protocol import THINKING_MODE_OFF, THINKING_MODE_ON, normalize_thinking_mode
 from lpt_runtime.files import atomic_torch_save, atomic_write_text, is_torch_save_file_readable
 
 
@@ -66,6 +67,15 @@ TRAINING_CHECKPOINT_FORMAT = "lpt_v2_training_checkpoint"
 TRAINING_CHECKPOINT_SCHEMA_VERSION = 1
 DATA_PROGRESS_SCHEMA_VERSION = 1
 LM_LOSS_CHUNK_TOKENS = 256
+THINKING_VISIBILITIES = ("hidden", "visible")
+
+
+def _normalize_thinking_visibility(visibility):
+    """规范化训练/推理审计中的 thinking 可见性字段。"""
+    normalized = "hidden" if visibility is None else str(visibility).strip().lower()
+    if normalized not in THINKING_VISIBILITIES:
+        raise ValueError("thinking_visibility 必须是 hidden 或 visible。")
+    return normalized
 
 PHASE_DISPLAY_NAMES = {
     "train": "训练(train)",
@@ -129,6 +139,8 @@ class TrainingRunConfig:
     save_scheduler: bool = DEFAULT_SAVE_SCHEDULER
     max_sequence_length: int | None = None
     sequence_packing: bool = DEFAULT_SEQUENCE_PACKING_ENABLED
+    thinking_mode: str = THINKING_MODE_OFF
+    thinking_visibility: str = "hidden"
     seed: int = DEFAULT_TRAINING_SEED
     deterministic_algorithms: bool = DEFAULT_DETERMINISTIC_ALGORITHMS
     resume_checkpoint: Path | None = None
@@ -207,6 +219,8 @@ class TrainingRunConfig:
         if self.best_checkpoint_min_delta < 0:
             raise ValueError("best_checkpoint_min_delta 必须为非负数。")
         self.key_checkpoints = tuple(sorted({int(value) for value in self.key_checkpoints if int(value) > 0}))
+        self.thinking_mode = normalize_thinking_mode(self.thinking_mode)
+        self.thinking_visibility = _normalize_thinking_visibility(self.thinking_visibility)
 
 
 def configure_training_runtime(seed=DEFAULT_TRAINING_SEED, *, deterministic=False):
@@ -1004,28 +1018,45 @@ def _build_batch_tensors(samples, tokenizer, config, rng=None):
     max_length = _resolve_batch_max_sequence_length(config, rng=rng)
     if config.sequence_packing:
         # packing 路径额外返回 position_ids/segment_ids，模型侧用 segment_ids 阻断跨样本注意力。
-        input_ids, labels, attention_mask, position_ids, segment_ids, sample_count = build_packed_training_batch(
+        (
+            input_ids,
+            labels,
+            attention_mask,
+            thinking_mode_ids,
+            target_channel_ids,
+            position_ids,
+            segment_ids,
+            sample_count,
+        ) = build_packed_training_batch(
             samples,
             tokenizer,
             max_length=max_length,
+            thinking_mode=config.thinking_mode,
+            include_thinking_tensors=True,
         )
         return {
             "input_ids": input_ids,
             "labels": labels,
             "attention_mask": attention_mask,
+            "thinking_mode_ids": thinking_mode_ids,
+            "target_channel_ids": target_channel_ids,
             "position_ids": position_ids,
             "segment_ids": segment_ids,
             "sample_count": sample_count,
         }
-    input_ids, labels, attention_mask = build_training_batch(
+    input_ids, labels, attention_mask, thinking_mode_ids, target_channel_ids = build_training_batch(
         samples,
         tokenizer,
         max_length=max_length,
+        thinking_mode=config.thinking_mode,
+        include_thinking_tensors=True,
     )
     return {
         "input_ids": input_ids,
         "labels": labels,
         "attention_mask": attention_mask,
+        "thinking_mode_ids": thinking_mode_ids,
+        "target_channel_ids": target_channel_ids,
         "position_ids": None,
         "segment_ids": None,
         "sample_count": len(samples),
@@ -1078,6 +1109,8 @@ def _forward_batch(model, batch):
         attention_mask=batch["attention_mask"],
         position_ids=batch["position_ids"],
         segment_ids=batch["segment_ids"],
+        thinking_mode_ids=batch.get("thinking_mode_ids"),
+        target_channel_ids=batch.get("target_channel_ids"),
         rope_cache_scope="train",
         request_id="train",
         use_kv_cache=False,
@@ -1585,6 +1618,61 @@ def _build_longrope2_training_strategy(config):
     }
 
 
+def _new_thinking_training_summary(config):
+    """创建本次训练累计 thinking 统计。"""
+    return {
+        "schema_version": 1,
+        "legacy_text_tags_supported": False,
+        "training_thinking_mode": config.thinking_mode,
+        "training_thinking_visibility": config.thinking_visibility,
+        "training_visibility_affects_loss": False,
+        "text_samples": 0,
+        "chat_samples": 0,
+        "assistant_messages": 0,
+        "assistant_messages_with_thinking_field": 0,
+        "assistant_messages_with_nonempty_thinking": 0,
+        "assistant_messages_with_empty_thinking": 0,
+        "assistant_messages_thinking_on": 0,
+        "assistant_messages_thinking_off": 0,
+    }
+
+
+def _resolve_training_assistant_thinking_mode(training_mode, message):
+    """按训练策略解析单条 assistant 消息的实际 thinking 分支。"""
+    mode = normalize_thinking_mode(training_mode)
+    if mode in {THINKING_MODE_ON, THINKING_MODE_OFF}:
+        return mode
+    return THINKING_MODE_ON if str(message.get("thinking") or "").strip() else THINKING_MODE_OFF
+
+
+def _update_thinking_training_summary(summary, samples, *, thinking_mode):
+    """按 batch 样本更新原生 thinking 统计。"""
+    for sample in samples:
+        sample_type = sample.get("type")
+        if sample_type == "text":
+            summary["text_samples"] += 1
+            continue
+        if sample_type != "chat":
+            continue
+        summary["chat_samples"] += 1
+        for message in sample.get("messages", ()):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            summary["assistant_messages"] += 1
+            if "thinking" in message:
+                summary["assistant_messages_with_thinking_field"] += 1
+                if str(message.get("thinking") or "").strip():
+                    summary["assistant_messages_with_nonempty_thinking"] += 1
+                else:
+                    summary["assistant_messages_with_empty_thinking"] += 1
+            resolved_mode = _resolve_training_assistant_thinking_mode(thinking_mode, message)
+            if resolved_mode == THINKING_MODE_ON:
+                summary["assistant_messages_thinking_on"] += 1
+            else:
+                summary["assistant_messages_thinking_off"] += 1
+    return summary
+
+
 def _build_trainer_state(
     config,
     *,
@@ -1597,6 +1685,7 @@ def _build_trainer_state(
     last_eval_metric=None,
     optimizer_group_summary=None,
     data_progress_summary=None,
+    thinking_summary=None,
 ):
     """生成 trainer_state，覆盖续训、报告和 checkpoint metadata 需要的字段。"""
     latest_eval_loss = None
@@ -1632,6 +1721,7 @@ def _build_trainer_state(
         "longrope2_training_strategy": _build_longrope2_training_strategy(config),
         "optimizer_group_summary": optimizer_group_summary,
         "data_progress": data_progress_summary,
+        "thinking": thinking_summary,
         "tokenizer_metadata": dict(config.tokenizer_metadata or {}),
         "training_config": _serialize_training_config(config),
     }
@@ -1716,6 +1806,7 @@ def train(
         _load_optimizer_scheduler_state(resume_checkpoint, optimizer, scheduler)
     tensorboard_writer = _build_tensorboard_writer(config)
     length_rng = random.Random(int(config.seed) + 7919)
+    thinking_summary = _new_thinking_training_summary(config)
 
     start_time = time()
     accumulated_steps = 0
@@ -1764,6 +1855,11 @@ def train(
             samples_seen += int(batch["sample_count"])
             tokens_seen += int(batch["attention_mask"].sum().item())
             last_loss = float(loss.detach().cpu())
+            _update_thinking_training_summary(
+                thinking_summary,
+                samples,
+                thinking_mode=config.thinking_mode,
+            )
             data_progress_tracker.update_after_batch(samples)
             cuda_memory_metrics = _collect_cuda_memory_metrics(device)
 
@@ -1847,6 +1943,7 @@ def train(
                 last_eval_metric=last_eval_metric,
                 optimizer_group_summary=optimizer_group_summary,
                 data_progress_summary=data_progress_tracker.summary(),
+                thinking_summary=dict(thinking_summary),
             )
             data_progress_payload = data_progress_tracker.to_payload(
                 config,
@@ -1957,6 +2054,7 @@ def train(
         last_eval_metric=last_eval_metric,
         optimizer_group_summary=optimizer_group_summary,
         data_progress_summary=data_progress_tracker.summary(),
+        thinking_summary=dict(thinking_summary),
     )
     data_progress_payload = data_progress_tracker.to_payload(
         config,

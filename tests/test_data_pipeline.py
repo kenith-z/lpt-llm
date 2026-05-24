@@ -7,6 +7,7 @@ import json
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import torch
 from transformers import AutoTokenizer
 
 
@@ -34,6 +35,10 @@ from lpt_protocol import (
 from tools.convert_instruction_chat_jsonl import convert_instruction_chat_jsonl
 from tools.convert_parquet_text_dataset import convert_parquet_text_dataset
 from tools.convert_raw_text_jsonl import convert_raw_text_jsonl
+from tools.convert_reasoning_chat_sft_datasets import (
+    convert_instruction_thinking_dataset,
+    convert_legacy_think_tags_in_chat_dataset,
+)
 
 
 class DummyTokenizer:
@@ -152,6 +157,146 @@ class TestStructuredDataPipeline(unittest.TestCase):
                 (DS_EOS_TOKEN, True),
             ],
         )
+
+    def test_assistant_thinking_is_native_field_and_non_assistant_rejected(self):
+        segments = render_training_segments(
+            {
+                "id": "chat-thinking-001",
+                "type": "chat",
+                "messages": [
+                    {"role": "user", "content": "证明命题"},
+                    {
+                        "role": "assistant",
+                        "thinking": "先使用反证法。",
+                        "content": "因此命题成立。",
+                    },
+                ],
+            },
+            template_version=GlobalConfig.chat_template_version,
+        )
+
+        self.assertIn(("先使用反证法。", True, "on", "thinking"), [
+            (segment.text, segment.supervise, segment.thinking_mode, segment.target_channel)
+            for segment in segments
+        ])
+        self.assertIn(("因此命题成立。", True, "on", "answer"), [
+            (segment.text, segment.supervise, segment.thinking_mode, segment.target_channel)
+            for segment in segments
+        ])
+        self.assertNotIn("<think>", "".join(segment.text for segment in segments))
+
+        with self.assertRaises(ValueError):
+            render_training_segments(
+                {
+                    "id": "bad-thinking",
+                    "type": "chat",
+                    "messages": [
+                        {"role": "user", "content": "问题", "thinking": "非法"},
+                        {"role": "assistant", "content": "回答"},
+                    ],
+                },
+                template_version=GlobalConfig.chat_template_version,
+            )
+
+    def test_training_auto_thinking_requires_nonempty_thinking(self):
+        empty_thinking_segments = render_training_segments(
+            {
+                "id": "chat-empty-thinking",
+                "type": "chat",
+                "messages": [
+                    {"role": "user", "content": "问题"},
+                    {"role": "assistant", "thinking": "", "content": "空思考回答"},
+                ],
+            },
+            template_version=GlobalConfig.chat_template_version,
+            thinking_mode="auto",
+        )
+        missing_thinking_segments = render_training_segments(
+            {
+                "id": "chat-missing-thinking",
+                "type": "chat",
+                "messages": [
+                    {"role": "user", "content": "问题"},
+                    {"role": "assistant", "content": "普通回答"},
+                ],
+            },
+            template_version=GlobalConfig.chat_template_version,
+            thinking_mode="auto",
+        )
+        nonempty_thinking_segments = render_training_segments(
+            {
+                "id": "chat-nonempty-thinking",
+                "type": "chat",
+                "messages": [
+                    {"role": "user", "content": "问题"},
+                    {"role": "assistant", "thinking": "先分析。", "content": "最终回答"},
+                ],
+            },
+            template_version=GlobalConfig.chat_template_version,
+            thinking_mode="auto",
+        )
+
+        empty_summary = [
+            (segment.text, segment.supervise, segment.thinking_mode, segment.target_channel)
+            for segment in empty_thinking_segments
+        ]
+        missing_summary = [
+            (segment.text, segment.supervise, segment.thinking_mode, segment.target_channel)
+            for segment in missing_thinking_segments
+        ]
+        nonempty_summary = [
+            (segment.text, segment.supervise, segment.thinking_mode, segment.target_channel)
+            for segment in nonempty_thinking_segments
+        ]
+        self.assertIn(("空思考回答", True, "off", "answer"), empty_summary)
+        self.assertIn(("普通回答", True, "off", "answer"), missing_summary)
+        self.assertIn(("先分析。", True, "on", "thinking"), nonempty_summary)
+        self.assertIn(("最终回答", True, "on", "answer"), nonempty_summary)
+
+    def test_legacy_think_tags_are_rejected_by_schema(self):
+        with self.assertRaises(ValueError):
+            render_training_segments(
+                {
+                    "id": "legacy-thinking",
+                    "type": "chat",
+                    "messages": [
+                        {"role": "user", "content": "问题"},
+                        {"role": "assistant", "content": "<think>内部</think>\n回答"},
+                    ],
+                },
+                template_version=GlobalConfig.chat_template_version,
+            )
+
+    def test_build_training_batch_can_return_native_thinking_control_tensors(self):
+        chat_sample = {
+            "id": "chat-thinking-001",
+            "type": "chat",
+            "messages": [
+                {"role": "user", "content": "你好"},
+                {"role": "assistant", "thinking": "先打招呼", "content": "世界"},
+            ],
+        }
+
+        (
+            input_ids,
+            labels,
+            attention_mask,
+            thinking_mode_ids,
+            target_channel_ids,
+        ) = build_training_batch(
+            [chat_sample],
+            self.tokenizer,
+            include_thinking_tensors=True,
+        )
+
+        self.assertEqual(input_ids.shape, labels.shape)
+        self.assertEqual(input_ids.shape, attention_mask.shape)
+        self.assertEqual(input_ids.shape, thinking_mode_ids.shape)
+        self.assertEqual(input_ids.shape, target_channel_ids.shape)
+        supervised_positions = labels.ne(-100)
+        self.assertTrue(torch.any(thinking_mode_ids[supervised_positions].eq(1)))
+        self.assertTrue(torch.any(target_channel_ids[supervised_positions].eq(1)))
+        self.assertTrue(torch.any(target_channel_ids[supervised_positions].eq(2)))
 
     def test_build_training_batch_masks_prompt_and_padding_only(self):
         chat_sample = {
@@ -516,6 +661,65 @@ class TestStructuredDataPipeline(unittest.TestCase):
         self.assertTrue(all(record["type"] == "chat" for record in sft_records + lora_records))
         self.assertTrue(all(record["messages"][0]["role"] == "user" for record in sft_records + lora_records))
         self.assertTrue(all(record["messages"][1]["role"] == "assistant" for record in sft_records + lora_records))
+
+    def test_reasoning_converter_writes_native_thinking_field(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            input_path = temp_root / "thinking.jsonl"
+            output_path = temp_root / "thinking.chat.sft.jsonl"
+            input_path.write_text(
+                json.dumps(
+                    {
+                        "instruction": "证明 1+1=2",
+                        "think": "使用皮亚诺公理。",
+                        "response": "结论成立。",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            convert_instruction_thinking_dataset(
+                input_path,
+                output_path,
+                source_name="thinking-unit",
+            )
+            records = load_dataset_records(output_path)
+
+        assistant = records[0]["messages"][1]
+        self.assertEqual(assistant["thinking"], "使用皮亚诺公理。")
+        self.assertEqual(assistant["content"], "结论成立。")
+        self.assertNotIn("<think>", json.dumps(records[0], ensure_ascii=False))
+
+    def test_legacy_think_converter_removes_text_tags(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            input_path = temp_root / "legacy.chat.sft.jsonl"
+            output_path = temp_root / "native.chat.sft.jsonl"
+            input_path.write_text(
+                json.dumps(
+                    {
+                        "id": "legacy-001",
+                        "type": "chat",
+                        "messages": [
+                            {"role": "user", "content": "问题"},
+                            {"role": "assistant", "content": "<think>\n内部推理\n</think>\n最终答案"},
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = convert_legacy_think_tags_in_chat_dataset(input_path, output_path)
+            records = load_dataset_records(output_path)
+
+        self.assertEqual(result["converted_assistant_messages"], 1)
+        self.assertEqual(records[0]["messages"][1]["thinking"], "内部推理")
+        self.assertEqual(records[0]["messages"][1]["content"], "最终答案")
+        self.assertNotIn("<think>", json.dumps(records[0], ensure_ascii=False))
 
     def test_convert_parquet_text_dataset_generates_structured_text(self):
         with tempfile.TemporaryDirectory() as temp_dir:

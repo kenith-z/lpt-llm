@@ -21,7 +21,7 @@ from lpt_protocol import DS_EOS_TOKEN
 # 待转换数据类型。PDF 原文只转成 text 样本；chat_sft/chat_lora 仅保留目录映射，避免手写路径。
 DATASET_KIND = "text"
 # 待处理 PDF 目录。命令行 --input-dir 可临时覆盖。
-PENDING_INPUT_DIR = PROJECT_ROOT / "data" / "pending-data" / "pdf"
+PENDING_INPUT_DIR = PROJECT_ROOT / "data" / "z-pending-data" / "pdf"
 # 输出 JSONL 路径。None 表示输出到 data/structured/<阶段目录>/<目录名>.text.jsonl。
 OUTPUT_PATH = None
 # JSONL 写入模式。True 表示追加到已有文件末尾；需要重建文件时用命令行 --overwrite 显式覆盖。
@@ -29,8 +29,8 @@ APPEND_OUTPUT = True
 # source 字段。None 表示使用输入目录名，保留来源但不写入不参与训练的额外元数据。
 SOURCE_NAME = None
 # 已处理原始 PDF 的归档根目录；真实归档路径会追加类型目录和输入目录名。
-ARCHIVE_ROOT = PROJECT_ROOT / "data" / "old-data"
-# 转换成功后是否移动已提取出文字的 PDF 到 old-data。图片 PDF 会跳过并保留在 pending。
+ARCHIVE_ROOT = PROJECT_ROOT / "data" / "z-old-data"
+# 转换成功后是否移动已提取出文字的 PDF 到 z-old-data。图片 PDF 会跳过并保留在 pending。
 MOVE_AFTER_CONVERT = True
 # 训练最大序列长度，默认与 GlobalConfig.train_max_sequence_length 保持一致；转换时会用 tokenizer 预分块。
 TRAIN_MAX_SEQUENCE_LENGTH = 4096
@@ -405,7 +405,7 @@ def _next_available_path(path):
 
 
 def archive_pdf_files(pdf_files, input_dir, *, archive_root, dataset_kind):
-    """把已成功提取文字的 PDF 移入 old-data 对应类型目录。"""
+    """把已成功提取文字的 PDF 移入 z-old-data 对应类型目录。"""
     kind_config = _resolve_kind_config(dataset_kind)
     input_dir = Path(input_dir)
     archive_dir = Path(archive_root) / kind_config.archive_dir / input_dir.name
@@ -528,8 +528,8 @@ def build_argument_parser():
     )
     parser.add_argument("--output", type=Path, default=OUTPUT_PATH, help="输出 JSONL 路径；默认按目录名推导。")
     parser.add_argument("--source", default=SOURCE_NAME, help="写入 source 字段；默认使用输入目录名。")
-    parser.add_argument("--archive-root", type=Path, default=ARCHIVE_ROOT, help="old-data 根目录。")
-    parser.add_argument("--keep-source", action="store_true", help="只转换，不移动已提取出文字的 PDF 到 old-data。")
+    parser.add_argument("--archive-root", type=Path, default=ARCHIVE_ROOT, help="z-old-data 根目录。")
+    parser.add_argument("--keep-source", action="store_true", help="只转换，不移动已提取出文字的 PDF 到 z-old-data。")
     parser.add_argument("--overwrite", action="store_true", help="覆盖已有 JSONL；默认是追加。")
     parser.add_argument(
         "--train-max-sequence-length",

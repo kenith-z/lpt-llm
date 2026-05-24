@@ -14,6 +14,44 @@ USER_ROLE = "user"
 ASSISTANT_ROLE = "assistant"
 OBSERVATION_ROLE = "observation"
 
+THINKING_MODE_OFF = "off"
+THINKING_MODE_ON = "on"
+THINKING_MODE_AUTO = "auto"
+
+THINKING_MODES = (
+    THINKING_MODE_OFF,
+    THINKING_MODE_ON,
+    THINKING_MODE_AUTO,
+)
+THINKING_MODE_TO_ID = {
+    THINKING_MODE_OFF: 0,
+    THINKING_MODE_ON: 1,
+    THINKING_MODE_AUTO: 2,
+}
+THINKING_MODE_ID_TO_NAME = {
+    value: key
+    for key, value in THINKING_MODE_TO_ID.items()
+}
+
+TARGET_CHANNEL_PROMPT = "prompt"
+TARGET_CHANNEL_THINKING = "thinking"
+TARGET_CHANNEL_ANSWER = "answer"
+
+TARGET_CHANNELS = (
+    TARGET_CHANNEL_PROMPT,
+    TARGET_CHANNEL_THINKING,
+    TARGET_CHANNEL_ANSWER,
+)
+TARGET_CHANNEL_TO_ID = {
+    TARGET_CHANNEL_PROMPT: 0,
+    TARGET_CHANNEL_THINKING: 1,
+    TARGET_CHANNEL_ANSWER: 2,
+}
+TARGET_CHANNEL_ID_TO_NAME = {
+    value: key
+    for key, value in TARGET_CHANNEL_TO_ID.items()
+}
+
 VALID_ROLES = frozenset(
     {
         SYSTEM_ROLE,
@@ -40,6 +78,8 @@ class RenderedSegment:
 
     text: str
     supervise: bool
+    thinking_mode: str = THINKING_MODE_OFF
+    target_channel: str = TARGET_CHANNEL_PROMPT
 
 
 LPT_DS_TEMPLATE = TemplateSpec(
@@ -78,6 +118,47 @@ def _normalize_content(content, *, label):
     return normalized
 
 
+def _normalize_optional_content(content, *, label):
+    """校验可选文本字段，空白值归一为空字符串。"""
+    if content is None:
+        return ""
+    if not isinstance(content, str):
+        raise TypeError(f"{label} 必须是字符串。")
+    return content.strip()
+
+
+def _reject_legacy_think_tags(content, *, label):
+    """拒绝旧版自然文本 thinking 边界，要求数据先转换为结构化字段。"""
+    if "<think>" in content or "</think>" in content:
+        raise ValueError(f"{label} 不能包含 <think> 或 </think>，请先转换为 thinking 字段。")
+
+
+def normalize_thinking_mode(mode):
+    """把 thinking 模式规范化为 off/on/auto。"""
+    normalized = THINKING_MODE_OFF if mode is None else str(mode).strip().lower()
+    if normalized not in THINKING_MODES:
+        raise ValueError(f"thinking_mode 必须是 {THINKING_MODES} 之一。")
+    return normalized
+
+
+def thinking_mode_to_id(mode):
+    """返回 thinking 模式的稳定整数 id。"""
+    return THINKING_MODE_TO_ID[normalize_thinking_mode(mode)]
+
+
+def normalize_target_channel(channel):
+    """把目标通道规范化为 prompt/thinking/answer。"""
+    normalized = TARGET_CHANNEL_PROMPT if channel is None else str(channel).strip().lower()
+    if normalized not in TARGET_CHANNELS:
+        raise ValueError(f"target_channel 必须是 {TARGET_CHANNELS} 之一。")
+    return normalized
+
+
+def target_channel_to_id(channel):
+    """返回目标通道的稳定整数 id。"""
+    return TARGET_CHANNEL_TO_ID[normalize_target_channel(channel)]
+
+
 def validate_messages(messages):
     """校验并标准化消息列表。"""
     if not isinstance(messages, list) or not messages:
@@ -92,50 +173,175 @@ def validate_messages(messages):
         if role not in VALID_ROLES:
             raise ValueError(f"第 {index} 条消息的 role 非法: {role}")
 
-        normalized_messages.append(
-            {
-                "role": role,
-                "content": _normalize_content(message.get("content"), label=f"第 {index} 条消息内容"),
-            }
-        )
+        content = _normalize_content(message.get("content"), label=f"第 {index} 条消息内容")
+        normalized_message = {
+            "role": role,
+            "content": content,
+        }
+        if role == ASSISTANT_ROLE:
+            _reject_legacy_think_tags(content, label=f"第 {index} 条 assistant 消息内容")
+            if "thinking" in message:
+                thinking = _normalize_optional_content(
+                    message.get("thinking"),
+                    label=f"第 {index} 条 assistant thinking",
+                )
+                _reject_legacy_think_tags(thinking, label=f"第 {index} 条 assistant thinking")
+                normalized_message["thinking"] = thinking
+        elif "thinking" in message:
+            _normalize_optional_content(
+                message.get("thinking"),
+                label=f"第 {index} 条非 assistant thinking",
+            )
+            raise ValueError("thinking 字段只能出现在 assistant 消息上。")
+
+        normalized_messages.append(normalized_message)
 
     return normalized_messages
 
 
-def render_prompt_from_messages(messages, template_version=None, add_generation_prompt=False):
-    """把结构化消息渲染为推理 prompt。"""
+def _assistant_response_mode(message, thinking_mode=THINKING_MODE_AUTO):
+    """按训练策略和 assistant 消息字段决定该轮原生 thinking 分支。"""
+    mode = normalize_thinking_mode(thinking_mode)
+    if mode in {THINKING_MODE_ON, THINKING_MODE_OFF}:
+        return mode
+    # auto 只把非空 thinking 视为 thinking on；字段缺失或空白字符串都按 off。
+    return THINKING_MODE_ON if str(message.get("thinking") or "").strip() else THINKING_MODE_OFF
+
+
+def render_prompt_segments_from_messages(
+    messages,
+    template_version=None,
+    add_generation_prompt=False,
+    thinking_mode=THINKING_MODE_OFF,
+    include_thinking=False,
+):
+    """把结构化消息渲染为推理 prompt 片段，并保留原生 thinking 控制信息。"""
     template_spec = get_template_spec(template_version)
     normalized_messages = validate_messages(messages)
+    generation_mode = normalize_thinking_mode(thinking_mode)
 
-    rendered_parts = [template_spec.prefix]
+    rendered_segments = [RenderedSegment(template_spec.prefix, supervise=False)]
     for message in normalized_messages:
-        rendered_parts.append(template_spec.role_tokens[message["role"]])
-        rendered_parts.append(message["content"])
-        if message["role"] == ASSISTANT_ROLE:
-            rendered_parts.append(template_spec.eos_token)
+        role = message["role"]
+        is_assistant = role == ASSISTANT_ROLE
+        message_mode = _assistant_response_mode(message) if is_assistant else THINKING_MODE_OFF
+        role_channel = TARGET_CHANNEL_THINKING if message_mode == THINKING_MODE_ON else TARGET_CHANNEL_ANSWER
+        rendered_segments.append(
+            RenderedSegment(
+                template_spec.role_tokens[role],
+                supervise=False,
+                thinking_mode=message_mode if is_assistant else THINKING_MODE_OFF,
+                target_channel=role_channel if is_assistant else TARGET_CHANNEL_PROMPT,
+            )
+        )
+        if include_thinking and is_assistant and message.get("thinking"):
+            rendered_segments.append(
+                RenderedSegment(
+                    message["thinking"],
+                    supervise=False,
+                    thinking_mode=THINKING_MODE_ON,
+                    target_channel=TARGET_CHANNEL_THINKING,
+                )
+            )
+        rendered_segments.append(
+            RenderedSegment(
+                message["content"],
+                supervise=False,
+                thinking_mode=message_mode if is_assistant else THINKING_MODE_OFF,
+                target_channel=TARGET_CHANNEL_ANSWER if is_assistant else TARGET_CHANNEL_PROMPT,
+            )
+        )
+        if is_assistant:
+            rendered_segments.append(
+                RenderedSegment(
+                    template_spec.eos_token,
+                    supervise=False,
+                    thinking_mode=message_mode,
+                    target_channel=TARGET_CHANNEL_ANSWER,
+                )
+            )
 
     if add_generation_prompt:
-        rendered_parts.append(template_spec.role_tokens[ASSISTANT_ROLE])
+        rendered_segments.append(
+            RenderedSegment(
+                template_spec.role_tokens[ASSISTANT_ROLE],
+                supervise=False,
+                thinking_mode=generation_mode,
+                target_channel=(
+                    TARGET_CHANNEL_THINKING
+                    if generation_mode == THINKING_MODE_ON
+                    else TARGET_CHANNEL_ANSWER
+                ),
+            )
+        )
 
-    return "".join(rendered_parts)
+    return rendered_segments
 
 
-def _render_chat_segments(messages, template_version=None):
+def render_prompt_from_messages(messages, template_version=None, add_generation_prompt=False):
+    """把结构化消息渲染为推理 prompt。"""
+    rendered_segments = render_prompt_segments_from_messages(
+        messages,
+        template_version=template_version,
+        add_generation_prompt=add_generation_prompt,
+        include_thinking=False,
+    )
+    return "".join(segment.text for segment in rendered_segments)
+
+
+def _render_chat_segments(messages, template_version=None, thinking_mode=THINKING_MODE_AUTO):
     """把 chat 样本渲染成带 supervise 标记的训练片段。"""
     template_spec = get_template_spec(template_version)
     normalized_messages = validate_messages(messages)
+    training_thinking_mode = normalize_thinking_mode(thinking_mode)
     rendered_segments = [RenderedSegment(template_spec.prefix, supervise=False)]
     assistant_message_count = 0
 
     for message in normalized_messages:
         role = message["role"]
-        rendered_segments.append(RenderedSegment(template_spec.role_tokens[role], supervise=False))
         is_assistant = role == ASSISTANT_ROLE
-        # 只监督 assistant 内容和其 EOS；system/user/observation 作为条件上下文。
-        rendered_segments.append(RenderedSegment(message["content"], supervise=is_assistant))
+        message_mode = (
+            _assistant_response_mode(message, thinking_mode=training_thinking_mode)
+            if is_assistant
+            else THINKING_MODE_OFF
+        )
+        role_channel = TARGET_CHANNEL_THINKING if message_mode == THINKING_MODE_ON else TARGET_CHANNEL_ANSWER
+        rendered_segments.append(
+            RenderedSegment(
+                template_spec.role_tokens[role],
+                supervise=False,
+                thinking_mode=message_mode if is_assistant else THINKING_MODE_OFF,
+                target_channel=role_channel if is_assistant else TARGET_CHANNEL_PROMPT,
+            )
+        )
+        # 只监督 assistant 的原生 thinking/content 和 EOS；system/user/observation 作为条件上下文。
+        if is_assistant and message.get("thinking"):
+            rendered_segments.append(
+                RenderedSegment(
+                    message["thinking"],
+                    supervise=True,
+                    thinking_mode=THINKING_MODE_ON,
+                    target_channel=TARGET_CHANNEL_THINKING,
+                )
+            )
+        rendered_segments.append(
+            RenderedSegment(
+                message["content"],
+                supervise=is_assistant,
+                thinking_mode=message_mode if is_assistant else THINKING_MODE_OFF,
+                target_channel=TARGET_CHANNEL_ANSWER if is_assistant else TARGET_CHANNEL_PROMPT,
+            )
+        )
         if is_assistant:
             assistant_message_count += 1
-            rendered_segments.append(RenderedSegment(template_spec.eos_token, supervise=True))
+            rendered_segments.append(
+                RenderedSegment(
+                    template_spec.eos_token,
+                    supervise=True,
+                    thinking_mode=message_mode,
+                    target_channel=TARGET_CHANNEL_ANSWER,
+                )
+            )
 
     if assistant_message_count == 0:
         raise ValueError("chat 样本至少需要包含一条 assistant 消息。")
@@ -148,16 +354,30 @@ def _render_text_segments(text, template_version=None):
     template_spec = get_template_spec(template_version)
     normalized_text = _normalize_content(text, label="text 样本文本")
     return [
-        RenderedSegment(normalized_text, supervise=True),
-        RenderedSegment(template_spec.eos_token, supervise=True),
+        RenderedSegment(
+            normalized_text,
+            supervise=True,
+            thinking_mode=THINKING_MODE_OFF,
+            target_channel=TARGET_CHANNEL_ANSWER,
+        ),
+        RenderedSegment(
+            template_spec.eos_token,
+            supervise=True,
+            thinking_mode=THINKING_MODE_OFF,
+            target_channel=TARGET_CHANNEL_ANSWER,
+        ),
     ]
 
 
-def render_training_segments(sample, template_version=None):
+def render_training_segments(sample, template_version=None, thinking_mode=THINKING_MODE_AUTO):
     """把结构化样本渲染成训练片段。"""
     sample_type = sample.get("type")
     if sample_type == "chat":
-        return _render_chat_segments(sample["messages"], template_version=template_version)
+        return _render_chat_segments(
+            sample["messages"],
+            template_version=template_version,
+            thinking_mode=thinking_mode,
+        )
     if sample_type == "text":
         return _render_text_segments(sample["text"], template_version=template_version)
     raise ValueError(f"不支持的样本类型: {sample_type}")

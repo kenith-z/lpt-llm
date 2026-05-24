@@ -68,6 +68,26 @@ README 只作为项目入口、主线边界和目录导航。
 }
 ```
 
+带原生 thinking 的 `chat` 样本示例：
+
+```json
+{
+  "type": "chat",
+  "messages": [
+    {"role": "user", "content": "请证明 1+1=2。"},
+    {
+      "role": "assistant",
+      "thinking": "先说明自然数加法定义，再给出结论。",
+      "content": "根据自然数加法定义，1 的后继与 1 相加得到 2，因此 1+1=2。"
+    }
+  ],
+  "source": "example-thinking"
+}
+```
+
+`thinking` 只能出现在 assistant 消息上。`chat_sft / chat_lora` 训练默认 `thinking_mode=auto`：assistant 的 `thinking` 字段存在且去空白后非空时走 thinking on 分支；`thinking` 缺失或为空字符串时走 off 分支。旧 `<think>` / `</think>` 自然文本标签不作为训练边界使用，应先转换为结构化 `thinking` 字段。
+
+
 ## 项目定位
 
 `lpt-llm` 当前是以 LPT（Ling Pre-trained Transformer，灵预）为核心的 LLM 研究工程。它适合验证模型结构、长上下文策略、训练 recipe、tokenizer/template、checkpoint schema、评测流程和执行层设计；它还不是完整生产级分布式训练系统或服务化推理平台。

@@ -136,6 +136,12 @@ class GenerationConfig:
     repetition_penalty: float = DEFAULT_GENERATION_REPETITION_PENALTY
     # 重复惩罚窗口大小，限制只扫描最近 token 以控制长上下文成本。
     repetition_window_size: int | None = DEFAULT_GENERATION_REPETITION_WINDOW_SIZE
+    # 原生 thinking 模式；off 强制不生成 thinking，on 生成 thinking+answer，auto 交给策略解析。
+    thinking_mode: str = "off"
+    # thinking 可见性；visible 返回思考链，hidden 只返回最终回答。
+    thinking_visibility: str = "hidden"
+    # thinking=on/auto 时最多生成的思考 token 数。
+    max_thinking_tokens: int = 128
 
 
 @dataclass(frozen=True)
@@ -181,6 +187,10 @@ class BaseTrainingRecipeConfig:
     deterministic_algorithms: bool = DEFAULT_DETERMINISTIC_ALGORITHMS
     # 是否启用 sequence packing；packing 会生成 segment_ids 阻断跨样本注意力。
     sequence_packing_enabled: bool = DEFAULT_SEQUENCE_PACKING_ENABLED
+    # 训练时使用的原生 thinking 策略；text 阶段默认 off，chat 阶段可覆盖为 auto。
+    thinking_mode: str = "off"
+    # 训练可见性仅写入审计元数据，不改变 loss 或 batch 构造。
+    thinking_visibility: str = "hidden"
     # 训练指标输出间隔。
     log_interval_steps: int = DEFAULT_LOG_INTERVAL_STEPS
     # 验证间隔；0 表示关闭周期性验证。
@@ -254,6 +264,10 @@ class BaseTrainingRecipeConfig:
             raise ValueError("best_checkpoint_metric 必须是 loss 或 eval_loss。")
         if self.best_checkpoint_min_delta < 0:
             raise ValueError("best_checkpoint_min_delta 必须为非负数。")
+        if self.thinking_mode not in {"off", "on", "auto"}:
+            raise ValueError("thinking_mode 必须是 off/on/auto。")
+        if self.thinking_visibility not in {"hidden", "visible"}:
+            raise ValueError("thinking_visibility 必须是 hidden/visible。")
 
 
 @dataclass(frozen=True)
@@ -294,6 +308,8 @@ class ChatSFTTrainingConfig(BaseTrainingRecipeConfig):
     learning_rate: float = CHAT_SFT_LEARNING_RATE
     # chat_sft 默认 warmup 比例。
     warmup_ratio: float = CHAT_SFT_WARMUP_RATIO
+    # chat SFT 默认按样本内非空 thinking 字段自动切换分支。
+    thinking_mode: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -314,6 +330,8 @@ class ChatLoRATrainingConfig(BaseTrainingRecipeConfig):
     learning_rate: float = CHAT_LORA_LEARNING_RATE
     # chat_lora 默认 warmup 比例。
     warmup_ratio: float = CHAT_LORA_WARMUP_RATIO
+    # chat LoRA 默认按样本内非空 thinking 字段自动切换分支。
+    thinking_mode: str = "auto"
     # LoRA 训练使用的基座来源。
     lora_base_source: str = DEFAULT_LORA_BASE_SOURCE
     # LoRA 低秩 rank。

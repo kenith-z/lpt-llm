@@ -72,11 +72,25 @@ def _load_model_and_tokenizer(args, execution_config):
     raise ValueError(f"未支持的模型类型: {args.model}")
 
 
+def _default_generation_thinking_options(model_name):
+    """按模型阶段返回推理 thinking 默认策略。"""
+    if model_name in {"chat_sft", "lora", "chat_lora"}:
+        return "on", "visible"
+    return "off", "hidden"
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
 
     execution_config = build_execution_config(args)
-    generation_config = build_generation_config_from_args(args)
+    default_thinking_mode, default_thinking_visibility = _default_generation_thinking_options(
+        args.model
+    )
+    generation_config = build_generation_config_from_args(
+        args,
+        default_thinking_mode=default_thinking_mode,
+        default_thinking_visibility=default_thinking_visibility,
+    )
     model, tokenizer = _load_model_and_tokenizer(args, execution_config)
     display_model_parameter_summary(model)
     if args.prompt is not None:
@@ -86,6 +100,8 @@ def main(argv=None):
             [args.prompt],
             generation_config=generation_config,
         )[0]
+        if result.thinking is not None:
+            print(f"Thinking> {result.thinking}")
         print(result.response)
         print(
             "tokens "

@@ -295,8 +295,14 @@ def apply_execution_plan_for_inference(model, execution_config=None):
     return apply_inference_execution_plan(model, execution_plan)
 
 
-def build_generation_config_from_args(args):
+def build_generation_config_from_args(
+    args,
+    *,
+    default_thinking_mode=None,
+    default_thinking_visibility=None,
+):
     """从 CLI 生成 GenerationConfig。"""
+    generation = GenerationConfig()
     return GenerationConfig(
         do_sample=not args.greedy,
         temperature=args.temperature,
@@ -305,6 +311,13 @@ def build_generation_config_from_args(args):
         max_length=args.max_new_tokens,
         repetition_penalty=args.repetition_penalty,
         repetition_window_size=args.repetition_window_size,
+        thinking_mode=args.thinking_mode or default_thinking_mode or generation.thinking_mode,
+        thinking_visibility=(
+            args.thinking_visibility
+            or default_thinking_visibility
+            or generation.thinking_visibility
+        ),
+        max_thinking_tokens=args.max_thinking_tokens,
     )
 
 
@@ -318,6 +331,9 @@ def add_generation_arguments(parser):
     parser.add_argument("--greedy", action="store_true", help="使用贪心解码。")
     parser.add_argument("--repetition-penalty", type=float, default=generation.repetition_penalty, help="重复惩罚。")
     parser.add_argument("--repetition-window-size", type=int, default=generation.repetition_window_size, help="重复惩罚窗口。")
+    parser.add_argument("--thinking-mode", choices=("off", "on", "auto"), default=None, help="原生 thinking 模式；不传时由入口按模型阶段决定。")
+    parser.add_argument("--thinking-visibility", choices=("hidden", "visible"), default=None, help="是否返回/展示 thinking；不传时由入口按模型阶段决定。")
+    parser.add_argument("--max-thinking-tokens", type=int, default=generation.max_thinking_tokens, help="thinking=on/auto 时最多生成的思考 token 数。")
 
 
 def add_model_arguments(parser, recipe=None):
@@ -356,6 +372,8 @@ def add_training_arguments(parser, recipe=None):
     parser.add_argument("--deterministic", dest="deterministic_algorithms", action="store_true", default=recipe.deterministic_algorithms, help="启用确定性算法。")
     parser.add_argument("--no-deterministic", dest="deterministic_algorithms", action="store_false", help="关闭确定性算法。")
     parser.add_argument("--no-sequence-packing", action="store_true", default=not recipe.sequence_packing_enabled, help="关闭 sequence packing。")
+    parser.add_argument("--training-thinking-mode", dest="thinking_mode", choices=("off", "on", "auto"), default=recipe.thinking_mode, help="训练时的原生 thinking 策略。")
+    parser.add_argument("--training-thinking-visibility", dest="thinking_visibility", choices=("hidden", "visible"), default=recipe.thinking_visibility, help="训练 thinking 可见性审计字段，不影响 loss。")
     parser.add_argument("--no-resume", action="store_true", help="忽略 latest checkpoint，重新训练。")
     parser.add_argument("--run-id", default=recipe.run_id, help="实验运行 ID，默认自动生成。")
     parser.add_argument("--no-tensorboard", action="store_true", default=not recipe.tensorboard_enabled, help="关闭 TensorBoard 输出。")
@@ -443,6 +461,8 @@ def merge_training_args_with_recipe(args, recipe):
         "seed": recipe.random_seed,
         "deterministic_algorithms": recipe.deterministic_algorithms,
         "no_sequence_packing": not recipe.sequence_packing_enabled,
+        "thinking_mode": recipe.thinking_mode,
+        "thinking_visibility": recipe.thinking_visibility,
         "no_resume": False,
         "run_id": recipe.run_id,
         "no_tensorboard": not recipe.tensorboard_enabled,

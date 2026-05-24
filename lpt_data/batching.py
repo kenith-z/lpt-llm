@@ -11,8 +11,12 @@ from lpt_protocol import (
     DS_BOS_TOKEN,
     DS_EOS_TOKEN,
     DS_PAD_TOKEN,
+    TARGET_CHANNEL_PROMPT,
+    THINKING_MODE_AUTO,
+    target_channel_to_id,
     get_template_spec,
     render_training_segments,
+    thinking_mode_to_id,
 )
 
 
@@ -30,6 +34,8 @@ class EncodedTrainingSample:
     sample_id: str
     input_ids: tuple[int, ...]
     labels: tuple[int, ...]
+    thinking_mode_ids: tuple[int, ...]
+    target_channel_ids: tuple[int, ...]
 
     @property
     def length(self):
@@ -43,6 +49,8 @@ class PackedTrainingSequence:
 
     input_ids: tuple[int, ...]
     labels: tuple[int, ...]
+    thinking_mode_ids: tuple[int, ...]
+    target_channel_ids: tuple[int, ...]
     position_ids: tuple[int, ...]
     segment_ids: tuple[int, ...]
 
@@ -86,9 +94,11 @@ def prepare_tokenizer(tokenizer):
 
 
 def _tokenize_rendered_segments(segments, tokenizer):
-    """把模板渲染片段编码成 input_ids，并按 supervise 标志构造 labels。"""
+    """把模板渲染片段编码成 token 序列和原生 thinking 控制序列。"""
     input_ids = []
     labels = []
+    thinking_mode_ids = []
+    token_channel_ids = []
     for segment in segments:
         encoded = tokenizer(segment.text, add_special_tokens=False)
         segment_ids = encoded["input_ids"]
@@ -97,24 +107,51 @@ def _tokenize_rendered_segments(segments, tokenizer):
         # 用户提示、系统提示等非监督片段写入 -100，让 cross entropy 忽略这些位置。
         input_ids.extend(segment_ids)
         labels.extend(segment_ids if segment.supervise else [-100] * len(segment_ids))
-    return input_ids, labels
+        thinking_mode_ids.extend([thinking_mode_to_id(segment.thinking_mode)] * len(segment_ids))
+        token_channel_ids.extend([target_channel_to_id(segment.target_channel)] * len(segment_ids))
+    target_channel_ids = _build_prediction_channel_ids(token_channel_ids)
+    return input_ids, labels, thinking_mode_ids, target_channel_ids
 
 
-def _truncate_sequence(input_ids, labels, max_length):
-    """按最大长度同步截断 input_ids 与 labels。"""
+def _build_prediction_channel_ids(token_channel_ids):
+    """把当前 token 通道转换成预测下一个 token 时使用的目标通道。"""
+    if not token_channel_ids:
+        return []
+    if len(token_channel_ids) == 1:
+        return [token_channel_ids[0]]
+    return list(token_channel_ids[1:]) + [token_channel_ids[-1]]
+
+
+def _truncate_sequence(input_ids, labels, thinking_mode_ids, target_channel_ids, max_length):
+    """按最大长度同步截断 input_ids、labels 和 thinking 控制张量。"""
     if max_length is None or len(input_ids) <= max_length:
-        return input_ids, labels
-    return input_ids[:max_length], labels[:max_length]
+        return input_ids, labels, thinking_mode_ids, target_channel_ids
+    return (
+        input_ids[:max_length],
+        labels[:max_length],
+        thinking_mode_ids[:max_length],
+        target_channel_ids[:max_length],
+    )
 
 
-def encode_training_sample(sample, tokenizer, max_length=None):
+def encode_training_sample(sample, tokenizer, max_length=None, *, thinking_mode=THINKING_MODE_AUTO):
     """把单条结构化样本编码成训练 token 序列。"""
     rendered_segments = render_training_segments(
         sample,
         template_version=GlobalConfig.chat_template_version,
+        thinking_mode=thinking_mode,
     )
-    input_ids, labels = _tokenize_rendered_segments(rendered_segments, tokenizer)
-    input_ids, labels = _truncate_sequence(input_ids, labels, max_length)
+    input_ids, labels, thinking_mode_ids, target_channel_ids = _tokenize_rendered_segments(
+        rendered_segments,
+        tokenizer,
+    )
+    input_ids, labels, thinking_mode_ids, target_channel_ids = _truncate_sequence(
+        input_ids,
+        labels,
+        thinking_mode_ids,
+        target_channel_ids,
+        max_length,
+    )
 
     sample_id = str(sample.get("id", "<unknown>"))
     if len(input_ids) < 2:
@@ -123,11 +160,20 @@ def encode_training_sample(sample, tokenizer, max_length=None):
         sample_id=sample_id,
         input_ids=tuple(input_ids),
         labels=tuple(labels),
+        thinking_mode_ids=tuple(thinking_mode_ids),
+        target_channel_ids=tuple(target_channel_ids),
     )
 
 
-def _pad_batch(batch_input_ids, batch_labels, pad_token_id, pad_to_multiple_of=None):
-    """把普通样本 batch padding 成 input_ids/labels/attention_mask。"""
+def _pad_batch(
+    batch_input_ids,
+    batch_labels,
+    batch_thinking_mode_ids,
+    batch_target_channel_ids,
+    pad_token_id,
+    pad_to_multiple_of=None,
+):
+    """把普通样本 batch padding 成 input_ids/labels/attention_mask 和 thinking 控制张量。"""
     max_sequence_length = max(len(sequence) for sequence in batch_input_ids)
     if pad_to_multiple_of:
         remainder = max_sequence_length % pad_to_multiple_of
@@ -138,19 +184,42 @@ def _pad_batch(batch_input_ids, batch_labels, pad_token_id, pad_to_multiple_of=N
     input_ids = torch.full((batch_size, max_sequence_length), pad_token_id, dtype=torch.long)
     labels = torch.full((batch_size, max_sequence_length), -100, dtype=torch.long)
     attention_mask = torch.zeros((batch_size, max_sequence_length), dtype=torch.long)
+    thinking_mode_ids = torch.zeros((batch_size, max_sequence_length), dtype=torch.long)
+    target_channel_ids = torch.full(
+        (batch_size, max_sequence_length),
+        target_channel_to_id(TARGET_CHANNEL_PROMPT),
+        dtype=torch.long,
+    )
 
-    for row_index, (sequence, sequence_labels) in enumerate(zip(batch_input_ids, batch_labels)):
+    for row_index, (
+        sequence,
+        sequence_labels,
+        sequence_thinking_mode_ids,
+        sequence_target_channel_ids,
+    ) in enumerate(
+        zip(batch_input_ids, batch_labels, batch_thinking_mode_ids, batch_target_channel_ids)
+    ):
         sequence_length = len(sequence)
         input_ids[row_index, :sequence_length] = torch.tensor(sequence, dtype=torch.long)
         labels[row_index, :sequence_length] = torch.tensor(sequence_labels, dtype=torch.long)
         attention_mask[row_index, :sequence_length] = 1
-    return input_ids, labels, attention_mask
+        thinking_mode_ids[row_index, :sequence_length] = torch.tensor(
+            sequence_thinking_mode_ids,
+            dtype=torch.long,
+        )
+        target_channel_ids[row_index, :sequence_length] = torch.tensor(
+            sequence_target_channel_ids,
+            dtype=torch.long,
+        )
+    return input_ids, labels, attention_mask, thinking_mode_ids, target_channel_ids
 
 
 def _build_packed_sequence(encoded_samples):
     """把多个样本串接成一条 packed row，并保留样本内位置和分段编号。"""
     packed_input_ids = []
     packed_labels = []
+    packed_thinking_mode_ids = []
+    packed_target_channel_ids = []
     packed_position_ids = []
     packed_segment_ids = []
 
@@ -158,12 +227,16 @@ def _build_packed_sequence(encoded_samples):
         # position_ids 对每个原始样本从 0 重启，配合 mixed LongRoPE2 保持样本内位置语义。
         packed_input_ids.extend(encoded_sample.input_ids)
         packed_labels.extend(encoded_sample.labels)
+        packed_thinking_mode_ids.extend(encoded_sample.thinking_mode_ids)
+        packed_target_channel_ids.extend(encoded_sample.target_channel_ids)
         packed_position_ids.extend(range(encoded_sample.length))
         packed_segment_ids.extend([segment_index] * encoded_sample.length)
 
     return PackedTrainingSequence(
         input_ids=tuple(packed_input_ids),
         labels=tuple(packed_labels),
+        thinking_mode_ids=tuple(packed_thinking_mode_ids),
+        target_channel_ids=tuple(packed_target_channel_ids),
         position_ids=tuple(packed_position_ids),
         segment_ids=tuple(packed_segment_ids),
     )
@@ -208,6 +281,12 @@ def _pad_packed_batch(packed_sequences, pad_token_id, pad_to_multiple_of=None):
     input_ids = torch.full((batch_size, max_sequence_length), pad_token_id, dtype=torch.long)
     labels = torch.full((batch_size, max_sequence_length), -100, dtype=torch.long)
     attention_mask = torch.zeros((batch_size, max_sequence_length), dtype=torch.long)
+    thinking_mode_ids = torch.zeros((batch_size, max_sequence_length), dtype=torch.long)
+    target_channel_ids = torch.full(
+        (batch_size, max_sequence_length),
+        target_channel_to_id(TARGET_CHANNEL_PROMPT),
+        dtype=torch.long,
+    )
     position_ids = torch.zeros((batch_size, max_sequence_length), dtype=torch.long)
     segment_ids = torch.zeros((batch_size, max_sequence_length), dtype=torch.long)
 
@@ -216,42 +295,103 @@ def _pad_packed_batch(packed_sequences, pad_token_id, pad_to_multiple_of=None):
         input_ids[row_index, :sequence_length] = torch.tensor(packed_sequence.input_ids, dtype=torch.long)
         labels[row_index, :sequence_length] = torch.tensor(packed_sequence.labels, dtype=torch.long)
         attention_mask[row_index, :sequence_length] = 1
+        thinking_mode_ids[row_index, :sequence_length] = torch.tensor(
+            packed_sequence.thinking_mode_ids,
+            dtype=torch.long,
+        )
+        target_channel_ids[row_index, :sequence_length] = torch.tensor(
+            packed_sequence.target_channel_ids,
+            dtype=torch.long,
+        )
         position_ids[row_index, :sequence_length] = torch.tensor(packed_sequence.position_ids, dtype=torch.long)
         segment_ids[row_index, :sequence_length] = torch.tensor(packed_sequence.segment_ids, dtype=torch.long)
-    return input_ids, labels, attention_mask, position_ids, segment_ids
+    return input_ids, labels, attention_mask, thinking_mode_ids, target_channel_ids, position_ids, segment_ids
 
 
-def build_training_batch(samples, tokenizer, max_length=None):
+def build_training_batch(
+    samples,
+    tokenizer,
+    max_length=None,
+    *,
+    thinking_mode=THINKING_MODE_AUTO,
+    include_thinking_tensors=False,
+):
     """把一批结构化样本编码成训练张量。"""
     batch_input_ids = []
     batch_labels = []
+    batch_thinking_mode_ids = []
+    batch_target_channel_ids = []
     for sample in samples:
-        encoded_sample = encode_training_sample(sample, tokenizer, max_length=max_length)
+        encoded_sample = encode_training_sample(
+            sample,
+            tokenizer,
+            max_length=max_length,
+            thinking_mode=thinking_mode,
+        )
         batch_input_ids.append(encoded_sample.input_ids)
         batch_labels.append(encoded_sample.labels)
+        batch_thinking_mode_ids.append(encoded_sample.thinking_mode_ids)
+        batch_target_channel_ids.append(encoded_sample.target_channel_ids)
 
     pad_to_multiple_of = GlobalConfig.pad_to_multiple_of if GlobalConfig.device.type == "cuda" else None
-    return _pad_batch(
+    padded = _pad_batch(
         batch_input_ids,
         batch_labels,
+        batch_thinking_mode_ids,
+        batch_target_channel_ids,
         pad_token_id=tokenizer.pad_token_id,
         pad_to_multiple_of=pad_to_multiple_of,
     )
+    if include_thinking_tensors:
+        return padded
+    input_ids, labels, attention_mask, _thinking_mode_ids, _target_channel_ids = padded
+    return input_ids, labels, attention_mask
 
 
-def build_packed_training_batch(samples, tokenizer, max_length):
+def build_packed_training_batch(
+    samples,
+    tokenizer,
+    max_length,
+    *,
+    thinking_mode=THINKING_MODE_AUTO,
+    include_thinking_tensors=False,
+):
     """把一批样本按 token 序列打包成 packed row 训练张量。"""
     encoded_samples = [
-        encode_training_sample(sample, tokenizer, max_length=max_length)
+        encode_training_sample(
+            sample,
+            tokenizer,
+            max_length=max_length,
+            thinking_mode=thinking_mode,
+        )
         for sample in samples
     ]
     packed_sequences = _pack_encoded_samples(encoded_samples, max_length=max_length)
     pad_to_multiple_of = GlobalConfig.pad_to_multiple_of if GlobalConfig.device.type == "cuda" else None
-    input_ids, labels, attention_mask, position_ids, segment_ids = _pad_packed_batch(
+    (
+        input_ids,
+        labels,
+        attention_mask,
+        thinking_mode_ids,
+        target_channel_ids,
+        position_ids,
+        segment_ids,
+    ) = _pad_packed_batch(
         packed_sequences,
         pad_token_id=tokenizer.pad_token_id,
         pad_to_multiple_of=pad_to_multiple_of,
     )
     # 返回 len(encoded_samples) 而不是 len(packed_sequences)，训练日志中 sample_count
     # 仍表示原始样本数，便于和非 packing 路径横向对比。
+    if include_thinking_tensors:
+        return (
+            input_ids,
+            labels,
+            attention_mask,
+            thinking_mode_ids,
+            target_channel_ids,
+            position_ids,
+            segment_ids,
+            len(encoded_samples),
+        )
     return input_ids, labels, attention_mask, position_ids, segment_ids, len(encoded_samples)

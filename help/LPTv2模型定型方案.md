@@ -2,7 +2,7 @@
 
 ## 开发分支边界
 
-- LPT v2 是独立模型开发分支，以 `architecture_version="lpt_v2"` 和 `model_config_schema_version=2` 作为唯一结构入口。
+- LPT v2 是独立模型开发分支，以 `architecture_version="lpt_v2"` 和当前 `model_config_schema_version` 作为唯一结构入口。
 - LPT v2 不兼容 LPT v1 checkpoint、LPT v1 `ModelConfig`、旧参数名、旧训练 recipe 或旧推理加载路径。
 - LPT v2 loader 对 schema、architecture version、block type、attention/cache backend、MoE/xLSTMMemory 配置执行严格校验。
 - LPT v2 不提供自动迁移、参数名映射或隐式 fallback，以最干净的 v2 schema 实现训练、推理、评测和 checkpoint。
@@ -34,7 +34,7 @@ LPT v2 定型为 `Attention-First + RetNetAssist-Q + Paged KV + Memory-Augmented
 
 ```text
 architecture_version = "lpt_v2"
-model_config_schema_version = 2
+model_config_schema_version = 3
 block_type = "lpt_attention_retnet_q_adapter"
 sequence_mixer_mode = "local_attention_with_retnet_q_adapter"
 default_model_size_preset = "lpt_v2_dev_tiny"
@@ -380,7 +380,7 @@ moe_router_warmup_policy = "standard_balance_only"
 - [x] 1. 定义 `ModelConfig` v2 字段
   - 字段范围：`architecture_version`、`block_type`、`sequence_mixer_mode`、`attention_backend_policy`、`attention_window_size`、`cache_backend`、`page_block_size`、`retnet_assist_*`、`moe_*`、`xlstm_memory_*`。
   - 成功标准：配置可 JSON 序列化，checkpoint 可严格恢复，不兼容 schema 被明确拒绝。
-  - 当前结果：`lpt_config/model_config.py` 已升级到 `model_config_schema_version=2`，新增 v2 架构、规格 preset、参数统计口径、Attention backend、Paged KV、RetNetAssist、MoE 与 xLSTMAssist 配置字段，并加入 v2 约束校验；checkpoint 继续按当前 schema 严格拒绝不兼容配置。
+  - 当前结果：`lpt_config/model_config.py` 已升级到 `model_config_schema_version=3`，新增 v2 架构、规格 preset、参数统计口径、Attention backend、Paged KV、RetNetAssist、MoE、xLSTMAssist 与原生 Thinking 控制配置字段，并加入 v2 约束校验；checkpoint 继续按当前 schema 严格拒绝不兼容配置。
 
 - [x] 2. 定义 `LayerStateV2`
   - 状态类型：`AttentionLayerState`、`RetNetAssistState`、`MoELayerState`、`xLSTMMemoryState`。

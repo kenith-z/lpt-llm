@@ -92,11 +92,24 @@ def _required_text(payload, field_name, *, path, line_number):
     return value.strip()
 
 
-def _wrap_think(thinking):
-    thinking = str(thinking).strip()
-    if thinking.startswith("<think>") and thinking.endswith("</think>"):
-        thinking = thinking[len("<think>") : -len("</think>")].strip()
-    return f"<think>\n{thinking}\n</think>"
+def split_legacy_think_content(content):
+    """把旧 `<think>...</think>` assistant 文本拆成 thinking 与最终回答。"""
+    text = str(content or "").strip()
+    start_tag = "<think>"
+    end_tag = "</think>"
+    if start_tag not in text and end_tag not in text:
+        return None, text
+    start_index = text.find(start_tag)
+    end_index = text.find(end_tag)
+    if start_index < 0 or end_index < 0 or end_index < start_index:
+        raise ValueError("旧 thinking 标签不完整，无法安全转换。")
+    thinking = text[start_index + len(start_tag):end_index].strip()
+    answer = (text[:start_index] + text[end_index + len(end_tag):]).strip()
+    if not thinking:
+        raise ValueError("旧 thinking 标签内为空，无法安全转换。")
+    if not answer:
+        raise ValueError("旧 thinking 标签后缺少最终回答。")
+    return thinking, answer
 
 
 def _compact_text(value):
@@ -225,7 +238,7 @@ def _build_logic_user_content(payload, language):
 
 def _build_logic_assistant_content(payload, reasoning, answer, language):
     final_answer = f"答案：{answer}" if language == "zh" else f"Answer: {answer}"
-    return f"{_wrap_think(_build_logic_thinking(payload, reasoning, language))}\n{final_answer}"
+    return _build_logic_thinking(payload, reasoning, language), final_answer
 
 
 def _build_dolly_user_content(payload):
@@ -240,7 +253,7 @@ def _build_dolly_user_content(payload):
 
 def _build_dolly_assistant_content(thinking, response, category):
     dolly_thinking = f"{_build_category_sentence(category)}\n\n{thinking}"
-    return f"{_wrap_think(dolly_thinking)}\n{response.strip()}"
+    return dolly_thinking, response.strip()
 
 
 def _record_id(source_name, raw_id, line_number):
@@ -255,14 +268,23 @@ def convert_logic_dataset(input_path, output_path, *, source_name, language):
         reasoning = _required_text(payload, "reasoning", path=input_path, line_number=line_number)
         answer = _required_text(payload, "answer", path=input_path, line_number=line_number)
         user_content = _build_logic_user_content(payload, language)
-        assistant_content = _build_logic_assistant_content(payload, reasoning, answer, language)
+        assistant_thinking, assistant_content = _build_logic_assistant_content(
+            payload,
+            reasoning,
+            answer,
+            language,
+        )
 
         record = {
             "id": _record_id(source_name, payload.get("id"), line_number),
             "type": "chat",
             "messages": [
                 {"role": "user", "content": user_content},
-                {"role": "assistant", "content": assistant_content},
+                {
+                    "role": "assistant",
+                    "thinking": assistant_thinking,
+                    "content": assistant_content,
+                },
             ],
             "source": source_name,
             "split": "train",
@@ -282,7 +304,11 @@ def convert_dolly_gld_dataset(input_path, output_path, *, source_name, language)
         thinking = _required_text(payload, "think", path=input_path, line_number=line_number)
         response = _required_text(payload, "response", path=input_path, line_number=line_number)
         user_content = _build_dolly_user_content(payload)
-        assistant_content = _build_dolly_assistant_content(thinking, response, payload.get("category"))
+        assistant_thinking, assistant_content = _build_dolly_assistant_content(
+            thinking,
+            response,
+            payload.get("category"),
+        )
 
         records.append(
             normalize_dataset_record(
@@ -291,7 +317,11 @@ def convert_dolly_gld_dataset(input_path, output_path, *, source_name, language)
                     "type": "chat",
                     "messages": [
                         {"role": "user", "content": user_content},
-                        {"role": "assistant", "content": assistant_content},
+                        {
+                            "role": "assistant",
+                            "thinking": assistant_thinking,
+                            "content": assistant_content,
+                        },
                     ],
                     "source": source_name,
                     "split": "train",
@@ -304,6 +334,67 @@ def convert_dolly_gld_dataset(input_path, output_path, *, source_name, language)
         raise ValueError(f"未从 {input_path} 解析出任何有效样本。")
     _write_jsonl(records, output_path)
     return len(records)
+
+
+def convert_instruction_thinking_dataset(input_path, output_path, *, source_name, language="zh"):
+    """转换 instruction/think/response JSONL 为原生 thinking chat 数据。"""
+    records = []
+    for line_number, payload in _read_jsonl(input_path):
+        instruction = _required_text(payload, "instruction", path=input_path, line_number=line_number)
+        thinking = _required_text(payload, "think", path=input_path, line_number=line_number)
+        response = _required_text(payload, "response", path=input_path, line_number=line_number)
+        records.append(
+            normalize_dataset_record(
+                {
+                    "id": _record_id(source_name, payload.get("id"), line_number),
+                    "type": "chat",
+                    "messages": [
+                        {"role": "user", "content": instruction},
+                        {
+                            "role": "assistant",
+                            "thinking": thinking,
+                            "content": response,
+                        },
+                    ],
+                    "source": source_name,
+                    "split": "train",
+                    "language": language,
+                }
+            )
+        )
+    if not records:
+        raise ValueError(f"未从 {input_path} 解析出任何有效样本。")
+    _write_jsonl(records, output_path)
+    return len(records)
+
+
+def convert_legacy_think_tags_in_chat_dataset(input_path, output_path):
+    """一次性清洗旧 `<think>...</think>` chat 数据，输出结构化 thinking 字段。"""
+    records = []
+    converted_count = 0
+    for line_number, payload in _read_jsonl(input_path):
+        if payload.get("type") != "chat":
+            records.append(normalize_dataset_record(payload))
+            continue
+        record = dict(payload)
+        messages = []
+        for message in payload.get("messages", ()):
+            if not isinstance(message, dict):
+                raise TypeError(f"{input_path}:{line_number} messages 中存在非字典消息。")
+            message_payload = dict(message)
+            if message_payload.get("role") == "assistant":
+                thinking, answer = split_legacy_think_content(message_payload.get("content"))
+                if thinking is not None:
+                    message_payload["thinking"] = thinking
+                    message_payload["content"] = answer
+                    converted_count += 1
+            messages.append(message_payload)
+        record["messages"] = messages
+        records.append(normalize_dataset_record(record))
+    if not records:
+        raise ValueError(f"未从 {input_path} 解析出任何有效样本。")
+    _write_jsonl(records, output_path)
+    return {"records": len(records), "converted_assistant_messages": converted_count}
 
 
 def _manifest_relative_path(manifest_path, dataset_path):
@@ -395,11 +486,39 @@ def build_argument_parser():
     )
     parser.add_argument("--update-manifest", action="store_true", help="转换后写入 chat_sft manifest。")
     parser.add_argument("--manifest-weight", type=float, default=1.0, help="写入 manifest 的默认 weight。")
+    parser.add_argument("--instruction-thinking-input", type=Path, default=None, help="单个 instruction/think/response JSONL 输入。")
+    parser.add_argument("--instruction-thinking-output", type=Path, default=None, help="单个原生 thinking chat 输出。")
+    parser.add_argument("--source-name", default=None, help="单文件转换时写入的 source 名称。")
+    parser.add_argument("--language", default="zh", help="单文件转换时写入的 language。")
+    parser.add_argument("--legacy-chat-input", type=Path, default=None, help="旧 <think> chat JSONL 输入。")
+    parser.add_argument("--legacy-chat-output", type=Path, default=None, help="旧 <think> chat JSONL 清洗输出。")
     return parser
 
 
 def main():
     args = build_argument_parser().parse_args()
+    if args.legacy_chat_input is not None or args.legacy_chat_output is not None:
+        if args.legacy_chat_input is None or args.legacy_chat_output is None:
+            raise ValueError("--legacy-chat-input 与 --legacy-chat-output 必须同时提供。")
+        result = convert_legacy_think_tags_in_chat_dataset(args.legacy_chat_input, args.legacy_chat_output)
+        print(
+            "converted_legacy_chat "
+            f"records={result['records']} converted_assistant_messages={result['converted_assistant_messages']} "
+            f"output={args.legacy_chat_output}"
+        )
+        return
+    if args.instruction_thinking_input is not None or args.instruction_thinking_output is not None:
+        if args.instruction_thinking_input is None or args.instruction_thinking_output is None:
+            raise ValueError("--instruction-thinking-input 与 --instruction-thinking-output 必须同时提供。")
+        source_name = args.source_name or args.instruction_thinking_input.stem
+        count = convert_instruction_thinking_dataset(
+            args.instruction_thinking_input,
+            args.instruction_thinking_output,
+            source_name=source_name,
+            language=args.language,
+        )
+        print(f"converted {source_name}: count={count} output={args.instruction_thinking_output}")
+        return
     convert_default_datasets(
         data_root=args.data_root,
         output_dir=args.output_dir,

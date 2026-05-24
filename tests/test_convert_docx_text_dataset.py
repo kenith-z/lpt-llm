@@ -79,12 +79,12 @@ class TestConvertDocxTextDataset(unittest.TestCase):
     def test_convert_docx_directory_to_jsonl_moves_source_files(self):
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT) as temp_dir:
             temp_root = Path(temp_dir)
-            pending_dir = temp_root / "data" / "pending-data" / "论文"
-            archive_root = temp_root / "data" / "old-data"
+            pending_dir = temp_root / "data" / "z-pending-data" / "论文"
+            archive_root = temp_root / "data" / "z-old-data"
             output_path = temp_root / "data" / "structured" / "text_pretrain" / "论文.text.jsonl"
 
-            _write_minimal_docx(pending_dir / "试论AI技术.docx", ["第一段", "第二段"])
-            _write_minimal_docx(pending_dir / "AI技术的应用研究.docx", ["第三段"])
+            _write_minimal_docx(pending_dir / "试论AI技术在IT审计中应用.docx", ["第一段", "第二段"])
+            _write_minimal_docx(pending_dir / "AI技术在IT审计中的应用研究.docx", ["第三段"])
 
             summary = convert_docx_directory_to_jsonl(
                 pending_dir,
@@ -106,17 +106,17 @@ class TestConvertDocxTextDataset(unittest.TestCase):
             self.assertTrue(all(record["source"] == "论文" for record in records))
             self.assertEqual({record["type"] for record in records}, {"text"})
             self.assertEqual({record["text"] for record in records}, {"第一段\n\n第二段", "第三段"})
-            self.assertFalse((pending_dir / "试论AI技术.docx").exists())
-            self.assertFalse((pending_dir / "AI技术的应用研究.docx").exists())
-            self.assertTrue((archive_root / "text" / "论文" / "试论AI技术.docx").exists())
-            self.assertTrue((archive_root / "text" / "论文" / "AI技术的应用研究.docx").exists())
+            self.assertFalse((pending_dir / "试论AI技术在IT审计中应用.docx").exists())
+            self.assertFalse((pending_dir / "AI技术在IT审计中的应用研究.docx").exists())
+            self.assertTrue((archive_root / "text" / "论文" / "试论AI技术在IT审计中应用.docx").exists())
+            self.assertTrue((archive_root / "text" / "论文" / "AI技术在IT审计中的应用研究.docx").exists())
 
     def test_convert_directory_accepts_legacy_doc_files(self):
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT) as temp_dir:
             temp_root = Path(temp_dir)
-            pending_dir = temp_root / "data" / "pending-data" / "word"
-            archive_root = temp_root / "data" / "old-data"
-            output_path = temp_root / "data" / "structured" / "text_pretrain" / "word.text.jsonl"
+            pending_dir = temp_root / "data" / "z-pending-data" / "法律"
+            archive_root = temp_root / "data" / "z-old-data"
+            output_path = temp_root / "data" / "structured" / "text_pretrain" / "法律.text.jsonl"
             doc_path = pending_dir / "legacy.doc"
             doc_path.parent.mkdir(parents=True, exist_ok=True)
             doc_path.write_bytes(b"legacy-doc-placeholder")
@@ -126,7 +126,7 @@ class TestConvertDocxTextDataset(unittest.TestCase):
                     pending_dir,
                     output_path,
                     dataset_kind="text",
-                    source_name="word",
+                    source_name="法律",
                     archive_root=archive_root,
                     move_to_archive=True,
                     train_max_sequence_length=None,
@@ -135,14 +135,14 @@ class TestConvertDocxTextDataset(unittest.TestCase):
             records = _load_jsonl(output_path)
 
             self.assertEqual(summary["input_files"], 1)
-            self.assertEqual(records, [{"id": "word-000001", "type": "text", "text": "旧 DOC 正文", "source": "word"}])
+            self.assertEqual(records, [{"id": "法律-000001", "type": "text", "text": "旧 DOC 正文", "source": "法律"}])
             self.assertFalse(doc_path.exists())
-            self.assertTrue((archive_root / "text" / "word" / "legacy.doc").exists())
+            self.assertTrue((archive_root / "text" / "法律" / "legacy.doc").exists())
 
     def test_convert_docx_directory_appends_to_existing_jsonl(self):
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT) as temp_dir:
             temp_root = Path(temp_dir)
-            pending_dir = temp_root / "data" / "pending-data" / "论文"
+            pending_dir = temp_root / "data" / "z-pending-data" / "论文"
             output_path = temp_root / "data" / "structured" / "text_pretrain" / "论文.text.jsonl"
             pending_doc = pending_dir / "append.docx"
             _write_minimal_docx(pending_doc, ["追加正文"])
@@ -179,7 +179,7 @@ class TestConvertDocxTextDataset(unittest.TestCase):
     def test_convert_docx_directory_chunks_by_train_max_sequence_length(self):
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT) as temp_dir:
             temp_root = Path(temp_dir)
-            pending_dir = temp_root / "data" / "pending-data" / "论文"
+            pending_dir = temp_root / "data" / "z-pending-data" / "论文"
             output_path = temp_root / "data" / "structured" / "text_pretrain" / "论文.text.jsonl"
             _write_minimal_docx(pending_dir / "long.docx", ["abcdefghi"])
 

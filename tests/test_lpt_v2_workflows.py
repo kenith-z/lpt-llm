@@ -45,6 +45,7 @@ from lpt_training.train import _compute_lm_loss, _save_checkpoint, _write_tensor
 from lpt_workflows.chat_lora import build_parser as build_chat_lora_parser
 from lpt_workflows.chat_sft import build_parser as build_chat_sft_parser
 from lpt_workflows.text_pretrain import build_parser as build_text_pretrain_parser
+from main import _default_generation_thinking_options
 
 
 class DummyTokenizer:
@@ -132,6 +133,16 @@ class TestLPTV2Workflows(unittest.TestCase):
         self.assertIsNone(text_args.eval_max_batches)
         self.assertEqual(text_args.latest_save_interval, TextPretrainingConfig().latest_save_interval_steps)
         self.assertFalse(text_args.save_best_checkpoint)
+        self.assertEqual(text_args.thinking_mode, "off")
+        self.assertEqual(sft_args.thinking_mode, "auto")
+        self.assertEqual(lora_args.thinking_mode, "auto")
+        self.assertEqual(sft_args.thinking_visibility, "hidden")
+
+    def test_inference_thinking_defaults_follow_model_stage(self):
+        self.assertEqual(_default_generation_thinking_options("text_pretrain"), ("off", "hidden"))
+        self.assertEqual(_default_generation_thinking_options("chat_sft"), ("on", "visible"))
+        self.assertEqual(_default_generation_thinking_options("lora"), ("on", "visible"))
+        self.assertEqual(_default_generation_thinking_options("chat_lora"), ("on", "visible"))
 
     def test_chunked_lm_loss_matches_reference_cross_entropy(self):
         logits = torch.randn(2, 5, 17, dtype=torch.float32, requires_grad=True)

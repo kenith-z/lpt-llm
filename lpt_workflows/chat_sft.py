@@ -145,6 +145,8 @@ def train_chat_sft_model(
             save_scheduler=not args.no_save_scheduler,
             max_sequence_length=args.train_max_sequence_length,
             sequence_packing=not args.no_sequence_packing,
+            thinking_mode=args.thinking_mode,
+            thinking_visibility=args.thinking_visibility,
             seed=args.seed,
             deterministic_algorithms=args.deterministic_algorithms,
             resume_checkpoint=resume_checkpoint,

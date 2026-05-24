@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from lpt_config import ModelConfig
+from lpt_config import MODEL_CONFIG_SCHEMA_VERSION, ModelConfig
 from lpt_model import (
     LPTV2,
     LPT_V2_CHECKPOINT_SCHEMA_VERSION,
@@ -18,6 +18,12 @@ from lpt_model import (
     load_lpt_v2_checkpoint,
     save_lpt_v2_checkpoint,
     validate_lpt_v2_checkpoint_payload,
+)
+from tools.upgrade_text_pretrain_native_thinking import (
+    THINKING_CHANNEL_KEY,
+    THINKING_MODE_KEY,
+    upgrade_checkpoint_payload,
+    upgrade_state_dict_for_native_thinking,
 )
 
 
@@ -105,6 +111,54 @@ class TestLPTV2StatePoolCheckpoint(unittest.TestCase):
         self.assertEqual(tuple(loaded.model.token_embedding.weight.shape), (32, model.config.hidden_size))
         self.assertFalse(loaded.missing_keys)
         self.assertFalse(loaded.unexpected_keys)
+
+    def test_upgrade_old_text_pretrain_checkpoint_adds_native_thinking_weights(self):
+        config = build_tiny_config()
+        old_config_payload = config.to_dict()
+        for key in (
+            "thinking_control_enabled",
+            "thinking_control_schema_version",
+            "thinking_mode_count",
+            "thinking_channel_count",
+        ):
+            old_config_payload.pop(key, None)
+        token_embedding = torch.randn(32, config.hidden_size, dtype=torch.float32)
+        payload = {
+            "checkpoint_format": "lpt_v2_checkpoint",
+            "checkpoint_schema_version": LPT_V2_CHECKPOINT_SCHEMA_VERSION,
+            "architecture_version": "lpt_v2",
+            "model_config_schema_version": MODEL_CONFIG_SCHEMA_VERSION - 1,
+            "model_config": old_config_payload,
+            "runtime_metadata": {
+                "cache_backend": {"name": config.cache_backend},
+                "state_schema": {"layer_state_schema": "LayerStateV2"},
+            },
+            "model_state_dict": {"token_embedding.weight": token_embedding},
+        }
+
+        upgraded, changed = upgrade_checkpoint_payload(payload, source_label="unit-test")
+
+        self.assertTrue(changed)
+        self.assertEqual(upgraded["model_config_schema_version"], MODEL_CONFIG_SCHEMA_VERSION)
+        self.assertEqual(tuple(upgraded["model_state_dict"][THINKING_MODE_KEY].shape), (3, config.hidden_size))
+        self.assertEqual(tuple(upgraded["model_state_dict"][THINKING_CHANNEL_KEY].shape), (3, config.hidden_size))
+        self.assertTrue(torch.all(upgraded["model_state_dict"][THINKING_MODE_KEY].eq(0)))
+        self.assertTrue(torch.all(upgraded["model_state_dict"][THINKING_CHANNEL_KEY].eq(0)))
+        self.assertEqual(
+            upgraded["runtime_metadata"]["state_schema"]["thinking_control"]["control_source"],
+            "structured_tensor",
+        )
+
+    def test_upgrade_native_thinking_state_dict_is_idempotent(self):
+        state_dict = {"token_embedding.weight": torch.randn(8, 4, dtype=torch.float32)}
+
+        upgraded, changed = upgrade_state_dict_for_native_thinking(state_dict)
+        second_upgrade, second_changed = upgrade_state_dict_for_native_thinking(upgraded)
+
+        self.assertTrue(changed)
+        self.assertFalse(second_changed)
+        self.assertEqual(tuple(second_upgrade[THINKING_MODE_KEY].shape), (3, 4))
+        self.assertEqual(tuple(second_upgrade[THINKING_CHANNEL_KEY].shape), (3, 4))
 
 
 if __name__ == "__main__":
