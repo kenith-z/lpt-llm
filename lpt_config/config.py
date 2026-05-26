@@ -142,6 +142,10 @@ class GenerationConfig:
     thinking_visibility: str = "hidden"
     # thinking=on/auto 时最多生成的思考 token 数。
     max_thinking_tokens: int = 128
+    # 输出格式：text 为普通文本，json 启用 JSON 语法约束，tool_call 启用工具调用结构解析。
+    output_format: str = "text"
+    # 工具调用策略：none 不解析工具调用，auto/required 解析模型输出中的 tool_calls。
+    tool_choice: str = "none"
 
 
 @dataclass(frozen=True)

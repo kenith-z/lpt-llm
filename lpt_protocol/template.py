@@ -1,6 +1,7 @@
 """DS tokenizer 上的版本化模板定义。"""
 
 from dataclasses import dataclass
+import json
 
 
 DEFAULT_TEMPLATE_VERSION = "lpt-ds-v1"
@@ -127,10 +128,67 @@ def _normalize_optional_content(content, *, label):
     return content.strip()
 
 
+def _normalize_message_content(message, *, label, allow_empty=False):
+    """按消息类型规范化 content；Function Call assistant 可允许空 content。"""
+    content = message.get("content", "")
+    if allow_empty:
+        return _normalize_optional_content(content, label=label)
+    return _normalize_content(content, label=label)
+
+
 def _reject_legacy_think_tags(content, *, label):
     """拒绝旧版自然文本 thinking 边界，要求数据先转换为结构化字段。"""
     if "<think>" in content or "</think>" in content:
         raise ValueError(f"{label} 不能包含 <think> 或 </think>，请先转换为 thinking 字段。")
+
+
+def _jsonable_tool_arguments(arguments, *, label):
+    """校验工具调用参数必须可 JSON 序列化。"""
+    if not isinstance(arguments, dict):
+        raise TypeError(f"{label} 必须是 JSON object/dict。")
+    try:
+        json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"{label} 必须可 JSON 序列化。") from error
+    return arguments
+
+
+def _normalize_tool_call(tool_call, *, label):
+    """规范化单个 Function Call 结构。"""
+    if not isinstance(tool_call, dict):
+        raise TypeError(f"{label} 必须是字典。")
+    name = _normalize_content(tool_call.get("name"), label=f"{label}.name")
+    arguments = _jsonable_tool_arguments(
+        tool_call.get("arguments", {}),
+        label=f"{label}.arguments",
+    )
+    normalized = {
+        "name": name,
+        "arguments": arguments,
+    }
+    tool_call_id = _normalize_optional_content(tool_call.get("id"), label=f"{label}.id")
+    if tool_call_id:
+        normalized["id"] = tool_call_id
+    return normalized
+
+
+def normalize_tool_calls(tool_calls, *, label="tool_calls"):
+    """规范化 assistant 原生 tool_calls。"""
+    if tool_calls is None:
+        return ()
+    if not isinstance(tool_calls, list) or not tool_calls:
+        raise ValueError(f"{label} 必须是非空列表。")
+    return tuple(
+        _normalize_tool_call(tool_call, label=f"{label}[{index}]")
+        for index, tool_call in enumerate(tool_calls)
+    )
+
+
+def serialize_tool_calls(tool_calls):
+    """把 tool_calls 渲染成稳定 JSON 文本，作为 LM 监督与推理解析边界。"""
+    normalized_tool_calls = normalize_tool_calls(tool_calls)
+    payload = {"tool_calls": list(normalized_tool_calls)}
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def normalize_thinking_mode(mode):
@@ -173,13 +231,26 @@ def validate_messages(messages):
         if role not in VALID_ROLES:
             raise ValueError(f"第 {index} 条消息的 role 非法: {role}")
 
-        content = _normalize_content(message.get("content"), label=f"第 {index} 条消息内容")
+        has_tool_calls = "tool_calls" in message
+        if has_tool_calls and role != ASSISTANT_ROLE:
+            raise ValueError("tool_calls 字段只能出现在 assistant 消息上。")
+        tool_calls = normalize_tool_calls(
+            message.get("tool_calls"),
+            label=f"第 {index} 条 assistant tool_calls",
+        ) if has_tool_calls else ()
+        content = _normalize_message_content(
+            message,
+            label=f"第 {index} 条消息内容",
+            allow_empty=bool(tool_calls),
+        )
         normalized_message = {
             "role": role,
             "content": content,
         }
         if role == ASSISTANT_ROLE:
             _reject_legacy_think_tags(content, label=f"第 {index} 条 assistant 消息内容")
+            if tool_calls:
+                normalized_message["tool_calls"] = list(tool_calls)
             if "thinking" in message:
                 thinking = _normalize_optional_content(
                     message.get("thinking"),
@@ -193,6 +264,13 @@ def validate_messages(messages):
                 label=f"第 {index} 条非 assistant thinking",
             )
             raise ValueError("thinking 字段只能出现在 assistant 消息上。")
+        if role == OBSERVATION_ROLE and "tool_call_id" in message:
+            tool_call_id = _normalize_optional_content(
+                message.get("tool_call_id"),
+                label=f"第 {index} 条 observation tool_call_id",
+            )
+            if tool_call_id:
+                normalized_message["tool_call_id"] = tool_call_id
 
         normalized_messages.append(normalized_message)
 
@@ -206,6 +284,13 @@ def _assistant_response_mode(message, thinking_mode=THINKING_MODE_AUTO):
         return mode
     # auto 只把非空 thinking 视为 thinking on；字段缺失或空白字符串都按 off。
     return THINKING_MODE_ON if str(message.get("thinking") or "").strip() else THINKING_MODE_OFF
+
+
+def _assistant_answer_text(message):
+    """返回 assistant 最终回答通道文本；tool_calls 优先渲染为结构化 JSON。"""
+    if message.get("tool_calls"):
+        return serialize_tool_calls(message["tool_calls"])
+    return message["content"]
 
 
 def render_prompt_segments_from_messages(
@@ -245,7 +330,7 @@ def render_prompt_segments_from_messages(
             )
         rendered_segments.append(
             RenderedSegment(
-                message["content"],
+                _assistant_answer_text(message) if is_assistant else message["content"],
                 supervise=False,
                 thinking_mode=message_mode if is_assistant else THINKING_MODE_OFF,
                 target_channel=TARGET_CHANNEL_ANSWER if is_assistant else TARGET_CHANNEL_PROMPT,
@@ -326,7 +411,7 @@ def _render_chat_segments(messages, template_version=None, thinking_mode=THINKIN
             )
         rendered_segments.append(
             RenderedSegment(
-                message["content"],
+                _assistant_answer_text(message) if is_assistant else message["content"],
                 supervise=is_assistant,
                 thinking_mode=message_mode if is_assistant else THINKING_MODE_OFF,
                 target_channel=TARGET_CHANNEL_ANSWER if is_assistant else TARGET_CHANNEL_PROMPT,

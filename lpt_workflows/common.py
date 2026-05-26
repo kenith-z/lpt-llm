@@ -318,6 +318,8 @@ def build_generation_config_from_args(
             or generation.thinking_visibility
         ),
         max_thinking_tokens=args.max_thinking_tokens,
+        output_format=getattr(args, "output_format", generation.output_format),
+        tool_choice=getattr(args, "tool_choice", generation.tool_choice),
     )
 
 
@@ -334,6 +336,8 @@ def add_generation_arguments(parser):
     parser.add_argument("--thinking-mode", choices=("off", "on", "auto"), default=None, help="原生 thinking 模式；不传时由入口按模型阶段决定。")
     parser.add_argument("--thinking-visibility", choices=("hidden", "visible"), default=None, help="是否返回/展示 thinking；不传时由入口按模型阶段决定。")
     parser.add_argument("--max-thinking-tokens", type=int, default=generation.max_thinking_tokens, help="thinking=on/auto 时最多生成的思考 token 数。")
+    parser.add_argument("--output-format", choices=("text", "json", "tool_call"), default=generation.output_format, help="输出格式；json/tool_call 会启用结构化解析。")
+    parser.add_argument("--tool-choice", choices=("none", "auto", "required"), default=generation.tool_choice, help="Function Call 策略；required 要求输出 tool_calls。")
 
 
 def add_model_arguments(parser, recipe=None):

@@ -23,7 +23,12 @@ from lpt_config import (
     ModelConfig,
     TextPretrainingConfig,
 )
-from lpt_inference import InferenceSession, display_model_parameter_summary
+from lpt_inference import (
+    GenerationStreamEvent,
+    InferenceSession,
+    StreamConsolePrinter,
+    display_model_parameter_summary,
+)
 from lpt_lora import (
     LoRAConfig,
     attach_lora_adapters,
@@ -45,6 +50,7 @@ from lpt_training.train import _compute_lm_loss, _save_checkpoint, _write_tensor
 from lpt_workflows.chat_lora import build_parser as build_chat_lora_parser
 from lpt_workflows.chat_sft import build_parser as build_chat_sft_parser
 from lpt_workflows.text_pretrain import build_parser as build_text_pretrain_parser
+from lpt_inference.inference import JsonOutputConstraint, _parse_structured_output
 from main import _default_generation_thinking_options
 
 
@@ -86,6 +92,27 @@ class DummyTokenizer:
                 self.next_id += 1
             input_ids.append(self.token_to_id[piece])
         return {"input_ids": input_ids}
+
+
+class JsonCharTokenizer:
+    def __init__(self):
+        chars = '{}[]":,abcdefghijklmnopqrstuvwxyz_0123456789 '
+        self.id_to_token = {index: char for index, char in enumerate(chars)}
+        self.token_to_id = {char: index for index, char in self.id_to_token.items()}
+        self.eos_token_id = len(self.id_to_token)
+        self.pad_token_id = len(self.id_to_token) + 1
+
+    def __len__(self):
+        return len(self.id_to_token) + 2
+
+    def decode(self, token_ids, skip_special_tokens=False):
+        pieces = []
+        for token_id in token_ids:
+            token_id = int(token_id)
+            if token_id in {self.eos_token_id, self.pad_token_id} and skip_special_tokens:
+                continue
+            pieces.append(self.id_to_token.get(token_id, ""))
+        return "".join(pieces)
 
 
 def build_tiny_config(**overrides):
@@ -143,6 +170,40 @@ class TestLPTV2Workflows(unittest.TestCase):
         self.assertEqual(_default_generation_thinking_options("chat_sft"), ("on", "visible"))
         self.assertEqual(_default_generation_thinking_options("lora"), ("on", "visible"))
         self.assertEqual(_default_generation_thinking_options("chat_lora"), ("on", "visible"))
+
+    def test_stream_console_printer_separates_thinking_and_answer(self):
+        stdout = io.StringIO()
+        printer = StreamConsolePrinter()
+
+        with redirect_stdout(stdout):
+            printer.print_event(GenerationStreamEvent(event_type="thinking_delta", text="先分析"))
+            printer.print_event(GenerationStreamEvent(event_type="answer_delta", text="最终回答"))
+            printer.finish()
+
+        self.assertEqual(stdout.getvalue(), "Thinking> 先分析\nAssistant> 最终回答\n")
+
+    def test_json_output_constraint_and_tool_call_parser(self):
+        tokenizer = JsonCharTokenizer()
+        constraint = JsonOutputConstraint(
+            tokenizer,
+            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+
+        self.assertTrue(constraint.allowed_token_ids(""))
+        self.assertTrue(constraint.is_complete('{"a":1}'))
+        self.assertFalse(constraint.is_complete('{"a":'))
+        self.assertIn(tokenizer.token_to_id["}"], constraint.allowed_token_ids('{"a":1'))
+
+        parsed, valid, error, tool_calls = _parse_structured_output(
+            '{"tool_calls":[{"name":"search_docs","arguments":{"query":"x"}}]}',
+            output_format="tool_call",
+            tool_choice="required",
+        )
+
+        self.assertTrue(valid, msg=error)
+        self.assertEqual(parsed["tool_calls"][0]["name"], "search_docs")
+        self.assertEqual(tool_calls[0]["arguments"], {"query": "x"})
 
     def test_chunked_lm_loss_matches_reference_cross_entropy(self):
         logits = torch.randn(2, 5, 17, dtype=torch.float32, requires_grad=True)

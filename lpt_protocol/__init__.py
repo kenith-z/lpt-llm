@@ -30,7 +30,9 @@ from .template import (
     render_prompt_from_messages,
     render_prompt_segments_from_messages,
     render_training_segments,
+    serialize_tool_calls,
     target_channel_to_id,
     thinking_mode_to_id,
+    normalize_tool_calls,
     validate_messages,
 )

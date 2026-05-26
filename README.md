@@ -87,6 +87,24 @@ README 只作为项目入口、主线边界和目录导航。
 
 `thinking` 只能出现在 assistant 消息上。`chat_sft / chat_lora` 训练默认 `thinking_mode=auto`：assistant 的 `thinking` 字段存在且去空白后非空时走 thinking on 分支；`thinking` 缺失或为空字符串时走 off 分支。旧 `<think>` / `</think>` 自然文本标签不作为训练边界使用，应先转换为结构化 `thinking` 字段。
 
+原生 JSON 结构化输出不新增训练样本类型，仍使用 `chat` 样本。训练目标放在 assistant 的 `content` 字段中，内容必须是合法 JSON object 或 array 字符串；推理阶段通过 `--output-format json` 启用 JSON 约束解码与解析。
+
+```json
+{
+  "type": "chat",
+  "messages": [
+    {"role": "user", "content": "把姓名张三、年龄18岁转换成 JSON。"},
+    {
+      "role": "assistant",
+      "content": "{\"name\":\"张三\",\"age\":18}"
+    }
+  ],
+  "source": "example-json"
+}
+```
+
+JSON 样本的 assistant `content` 不应混入解释性文本或 Markdown 代码块；需要工具调用时使用 assistant 的结构化 `tool_calls` 字段，而不是把工具调用伪装成普通 JSON 回答。
+
 
 ## 项目定位
 

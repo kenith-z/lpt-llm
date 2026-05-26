@@ -267,6 +267,57 @@ class TestStructuredDataPipeline(unittest.TestCase):
                 template_version=GlobalConfig.chat_template_version,
             )
 
+    def test_assistant_tool_calls_are_native_chat_fields(self):
+        segments = render_training_segments(
+            {
+                "id": "chat-tool-call",
+                "type": "chat",
+                "messages": [
+                    {"role": "user", "content": "查一下资料"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_001",
+                                "name": "search_docs",
+                                "arguments": {"query": "LongRoPE2"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "observation",
+                        "tool_call_id": "call_001",
+                        "content": "LongRoPE2 是长上下文 RoPE 扩展方案。",
+                    },
+                    {"role": "assistant", "content": "资料显示 LongRoPE2 用于扩展上下文。"},
+                ],
+            },
+            template_version=GlobalConfig.chat_template_version,
+        )
+        supervised_text = "".join(segment.text for segment in segments if segment.supervise)
+
+        self.assertIn('"tool_calls"', supervised_text)
+        self.assertIn('"name":"search_docs"', supervised_text)
+        self.assertIn('"arguments":{"query":"LongRoPE2"}', supervised_text)
+
+        with self.assertRaises(ValueError):
+            render_training_segments(
+                {
+                    "id": "bad-tool-call",
+                    "type": "chat",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "非法工具调用",
+                            "tool_calls": [{"name": "search_docs", "arguments": {}}],
+                        },
+                        {"role": "assistant", "content": "回答"},
+                    ],
+                },
+                template_version=GlobalConfig.chat_template_version,
+            )
+
     def test_build_training_batch_can_return_native_thinking_control_tensors(self):
         chat_sample = {
             "id": "chat-thinking-001",
