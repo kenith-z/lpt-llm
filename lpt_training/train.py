@@ -98,7 +98,8 @@ METRIC_DISPLAY_NAMES = {
     "grad_norm": "梯度范数(grad_norm)",
     "cuda_memory_allocated_mib": "CUDA已分配MiB(cuda_memory_allocated_mib)",
     "cuda_memory_reserved_mib": "CUDA已保留MiB(cuda_memory_reserved_mib)",
-    "cuda_peak_memory_allocated_mib": "CUDA峰值MiB(cuda_peak_memory_allocated_mib)",
+    "cuda_peak_memory_allocated_mib": "CUDA分配峰值MiB(cuda_peak_memory_allocated_mib)",
+    "cuda_peak_memory_reserved_mib": "CUDA保留峰值MiB(cuda_peak_memory_reserved_mib)",
     "elapsed_seconds": "耗时秒(elapsed_seconds)",
     "eval_loss": "验证损失(eval_loss)",
     "eval_ppl": "验证困惑度(eval_ppl)",
@@ -1152,6 +1153,7 @@ def _collect_cuda_memory_metrics(device):
         "cuda_memory_allocated_mib": torch.cuda.memory_allocated(device) / to_mib,
         "cuda_memory_reserved_mib": torch.cuda.memory_reserved(device) / to_mib,
         "cuda_peak_memory_allocated_mib": torch.cuda.max_memory_allocated(device) / to_mib,
+        "cuda_peak_memory_reserved_mib": torch.cuda.max_memory_reserved(device) / to_mib,
     }
 
 
@@ -1187,6 +1189,8 @@ def _evaluate_model(model, tokenizer, eval_dataset, config, device):
         if loss is not None:
             losses.append(float(loss.detach().cpu()))
             token_count += valid_targets
+        # eval 不需要保留 logits 或辅助状态；及时释放，避免长样本影响后续短样本显存。
+        del logits, _states, loss, batch
         if max_eval_batches is not None and batch_index >= max_eval_batches:
             break
     if was_training:
@@ -1249,6 +1253,7 @@ def _print_metric_record(namespace, metric):
         "cuda_memory_allocated_mib",
         "cuda_memory_reserved_mib",
         "cuda_peak_memory_allocated_mib",
+        "cuda_peak_memory_reserved_mib",
         "elapsed_seconds",
     ]
     keys = [key for key in ordered_keys if key in metric]
@@ -1847,6 +1852,7 @@ def train(
                 loss, valid_targets = _compute_lm_loss(logits, batch["labels"])
             if loss is None:
                 # 极端截断或模板异常可能让 batch 没有监督 token，此时跳过该 batch。
+                del logits, _states, batch
                 continue
             scaled_loss = loss / int(config.gradient_accumulation_steps)
             scaled_loss.backward()
@@ -1861,7 +1867,9 @@ def train(
                 thinking_mode=config.thinking_mode,
             )
             data_progress_tracker.update_after_batch(samples)
-            cuda_memory_metrics = _collect_cuda_memory_metrics(device)
+            # backward 后计算图已释放；这些大张量不再参与后续日志/checkpoint。
+            # 主动删除可避免上一轮长序列 logits 在下一轮短序列 forward 期间仍占用显存。
+            del logits, _states, loss, scaled_loss, batch
 
             if accumulated_steps >= int(config.gradient_accumulation_steps):
                 trainable_parameters = [
@@ -1881,6 +1889,7 @@ def train(
                 optimizer.zero_grad(set_to_none=True)
                 optimizer_step += 1
                 accumulated_steps = 0
+            cuda_memory_metrics = _collect_cuda_memory_metrics(device)
 
             progress_postfix = {
                 "损失(loss)": f"{last_loss:.4g}",
@@ -1892,8 +1901,11 @@ def train(
             if last_grad_norm is not None:
                 progress_postfix["梯度范数(grad_norm)"] = f"{last_grad_norm:.4g}"
             if cuda_memory_metrics:
-                progress_postfix["CUDA峰值MiB(cuda_peak)"] = (
+                progress_postfix["CUDA分配峰值MiB(cuda_peak_alloc)"] = (
                     f"{cuda_memory_metrics['cuda_peak_memory_allocated_mib']:.1f}"
+                )
+                progress_postfix["CUDA保留MiB(cuda_reserved)"] = (
+                    f"{cuda_memory_metrics['cuda_memory_reserved_mib']:.1f}"
                 )
             progress_bar.set_postfix(progress_postfix)
 
