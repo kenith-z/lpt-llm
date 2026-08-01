@@ -52,7 +52,7 @@
 - Python 环境：项目 `.venv`
 - 对比脚本：`tests/test_tokenizer_jsonl_token_counts.py`
 - GLM tokenizer：`lpt_model/glm_tokenizer`
-- DS tokenizer：`lpt_model/ds_tokenizer`
+- DS tokenizer：`../../../../../lpt_model/ds_tokenizer`
 
 ## 4. 实验方法
 

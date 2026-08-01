@@ -19,7 +19,7 @@
 
 ### 2.1 数据材料
 
-实验语料为 1-11 号专升本教材结构化 text JSONL，共 416 条样本。各文件均来自 `data/structured/`，并复制到独立素材目录。
+实验语料为 1-11 号专升本教材结构化 text JSONL，共 416 条样本。各文件均来自 `../../../data/structured`，并复制到独立素材目录。
 
 此前 token 计数实验结果如下：
 
@@ -35,7 +35,7 @@
 
 | 项目 | GLM5.1 | DS4Tokenizer |
 |---|---:|---:|
-| tokenizer 路径 | `.tmp_moe_llm_GLM/lpt_model/glm_tokenizer` | `lpt_model/ds_tokenizer` |
+| tokenizer 路径 | `.tmp_moe_llm_GLM/lpt_model/glm_tokenizer` | `../../../lpt_model/ds_tokenizer` |
 | vocab size | 154856 | 129280 |
 | tokenizer_config SHA256 | `BE52009AC92A886B146B51D3F4E17F45CF449A3A596B3CBA2F8D81A93589B191` | `789E16A9396DC44A7D0EAF8627DBFDFD9F583F49EC82FF543ECC6A1A11DC8049` |
 | BOS | `None` | `<｜begin▁of▁sentence｜>` / id `0` |
@@ -73,7 +73,7 @@ GLM5.1 使用同一 token 作为 EOS 与 PAD。DS4Tokenizer 对 BOS、EOS、PAD 
 
 ### 3.3 LongRoPE2 Factor Sweep
 
-用户已在 `.tmp_moe_llm_GLM` 中运行 `main-pretrain.py` 并生成 GLM5.1 `text_pretrain` checkpoint。检查结果表明，GLM5.1 与 DS 均具备 `text_pretrain` 阶段 checkpoint，因此可以进行同阶段 LongRoPE2 factor sweep 对比。
+用户已在 `.tmp_moe_llm_GLM` 中运行 `../../../main-pretrain.py` 并生成 GLM5.1 `text_pretrain` checkpoint。检查结果表明，GLM5.1 与 DS 均具备 `text_pretrain` 阶段 checkpoint，因此可以进行同阶段 LongRoPE2 factor sweep 对比。
 
 评测设置如下：
 

@@ -17,7 +17,6 @@ README 只作为项目入口、主线边界和目录导航。
 - [help/任务清单.md](help/任务清单.md)：当前工程状态、已完成项、待办项与任务拆解。
 - [help/LPTv2模型定型方案.md](help/LPTv2模型定型方案.md)：v2 架构、模块语义、状态边界和定型约束。
 - [help/LPTv2模型定型方案变动记录.md](help/LPTv2模型定型方案变动记录.md)：v2 方案演进记录。
-- [help/longRoPE2总结.md](help/longRoPE2总结.md)：LongRoPE2 相关设计和总结。
 - [help/LPTv2扩展实验/](help/LPTv2扩展实验/)：扩展实验记录、评测报告和实验产物说明。
 
 ## 目录导航

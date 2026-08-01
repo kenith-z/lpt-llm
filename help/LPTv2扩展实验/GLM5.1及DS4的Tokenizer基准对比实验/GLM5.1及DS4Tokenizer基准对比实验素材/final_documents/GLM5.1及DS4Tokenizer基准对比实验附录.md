@@ -25,7 +25,7 @@ help/GLM5.1及DS4Tokenizer基准对比实验素材/
 | `benchmark_outputs/sequence_packing/sequence_packing_glm_textbooks_1_11_bs1_trainlen7680_off.json` | `.tmp_moe_llm_GLM/.tmp_glm_benchmarks/...` | GLM5.1 侧 7680 长窗口 `bs1` 可运行基线。 |
 | `benchmark_outputs/longrope2_sweep/ds_text_pretrain_longrope2_factor_sweep.json/.md` | `.tmp_ds_benchmarks/longrope2_factor_sweep_ds_textbooks_1_11_text_pretrain_smoke/` | DS `text_pretrain` LongRoPE2 sweep 结果。 |
 | `benchmark_outputs/longrope2_sweep/glm_text_pretrain_longrope2_factor_sweep.json/.md` | `.tmp_moe_llm_GLM/.tmp_glm_benchmarks/longrope2_factor_sweep_glm_textbooks_1_11_text_pretrain_smoke/` | GLM5.1 `text_pretrain` LongRoPE2 sweep 结果。 |
-| `tokenizer_metadata/ds_tokenizer/tokenizer_config.json` | `lpt_model/ds_tokenizer/tokenizer_config.json` | DS tokenizer 配置快照。 |
+| `tokenizer_metadata/ds_tokenizer/tokenizer_config.json` | `../../../../../lpt_model/ds_tokenizer/tokenizer_config.json` | DS tokenizer 配置快照。 |
 | `tokenizer_metadata/glm_tokenizer/tokenizer_config.json` | `.tmp_moe_llm_GLM/lpt_model/glm_tokenizer/tokenizer_config.json` | GLM5.1 tokenizer 配置快照。 |
 | `scripts/current_ds/*.py` | 当前 DS 分支相关脚本 | 保存 DS 侧 benchmark、sweep 与 tokenizer 对比脚本快照。 |
 | `scripts/glm5_1/*.py` | `.tmp_moe_llm_GLM` 旧分支相关脚本 | 保存 GLM5.1 侧 benchmark 与 sweep 脚本快照。 |
