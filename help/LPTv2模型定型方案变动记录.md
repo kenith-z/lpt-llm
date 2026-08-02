@@ -1,6 +1,50 @@
 # LPT v2 模型定型方案变动记录
 
-本文只记录 LPT v2 定型方案的历史变动。当前实现与任务拆解以 `help/LPTv2模型定型方案.md` 为准。
+本文只记录 LPT v2 定型方案的历史变动。`help/任务清单.md` 负责范围、状态和优先级，`help/LPTv2模型定型方案.md` 负责技术契约与验收语义；两者冲突时先停止实现并完成文档裁决，不能由本历史记录覆盖当前事实。
+
+## 2026-08-03
+
+- 冻结停止串首版匹配语义：使用最终可见 answer 文本的 Unicode 标量值序列精确匹配，不隐式执行 NFC/NFKC、大小写折叠或空白规整；停止串长度与 holdback 容量统一按 Unicode 标量值计量，byte pending 独立处理，并补多字节、辅助平面、组合字符和规范等价反例准入。
+- 补齐 GPU lease 永久隔离后的恢复边界：只有确定性销毁旧执行上下文或进程重启后才能建立新的空页池代次，全部陈旧引用失效；P3 负责页池重建与启动自检，P2 负责 readiness、请求终态和显式重放。同步将纯离线 DPO 的正式模型前向与 logprob 契约写入任务清单，区分策略/参考模型训练 logprob 与在线采样 raw/behavior logprob，并把 `lm_head_chunk_size` 的恢复校验收敛为默认防漂移、等价准入后允许显式覆盖。
+
+## 2026-08-02
+
+- 重新核查 CLA 当前实现：`cla_share_every_n_layers` 仅为禁用态保留字段，`ModelConfig` 强制其为 1 并拒绝 2；`LPTV2` 各层独立创建 `k_proj/v_proj`，不存在模型消费点或跨层 K/V 复用。当前只有拒绝 CLA 启用值的配置测试，没有启用路径的模型、缓存/checkpoint 测试或实验报告。因此 CLA 保持“未实现、未评估”，不得因字段存在而标记完成。
+- 裁决新旧实验原则：22-27 已完成单项分支只作为 2026-08-02 前的历史归因，不追溯改写；后续新增或尚未启动的兼容候选采用组合优先统一测速。同步把任务清单中已完成的 24-27 状态改回 `[x]`，CLA 保持 `[ ]` 并补实现、缓存语义和组合准入边界。
+- 为组合优先原则补齐 P2 第 10 项治理载体：新增版本化候选包 manifest、统一基准套件 manifest，以及 run metadata 对两者 id、版本和摘要的强绑定与 fail-closed 校验。
+- 根据审计结果，将 P1.5 改为“训练工程与显存优化专项”，把 7.4 定为单机及通用 trainer-state、提交边界和 RNG 语义事实源，P2 第 8 项只扩展 rank/world size/shard/sampler 与全 rank 共识；P2 同时负责 Attention execution plan 控制面，P3-KV2 负责分页描述、block table 和 direct paged decode 数据面。
+- 将近期优先级补入 7.4 训练提交正确性和 7.5 纯文本拒绝账本；澄清 P2 单请求采样/logprob 与 P3 逐 row 扩展的继承关系，并给已完成的流式事件通道补充“增量解码与终态正确性仍未完成”的状态说明。
+- 冻结“成熟兼容项先组合、统一测速、回归后定向拆分”的技术采用原则：正确性与恢复约束直接实施，不做收益消融；训练稳定性、架构/运行时和多模态交互分别按依赖形成版本化候选包，不做全排列或全因子实验。KV0-KV5 依赖门、从头初始化与 checkpoint 派生边界、互斥结构、目标硬件低精度验证和后训练阶段仍独立守门；已完成的历史单项实验不追溯改写。
+- 明确候选技术规范来源为带版本标识的公开论文、官方技术文档/模型卡或许可允许且经审计的公开实现；P2 实验元数据登记 `spec_id / source_type / source_locator / source_revision / license_id`，保证正式方案与任务不依赖参考项目或过程材料。
+- 根据技术复核结果，将纯文本路径的 Attention 执行计划、KV0-KV5 分页数据面、generation/执行租约、事务回滚、continuous batching、逐请求采样、终态与 logprob 口径、训练提交边界、完整 RNG/manifest 摘要和 P4 组合优先准入矩阵写入定型方案；这些约束使用 LPT 自有术语，不改变当前默认主干或任务完成状态。
+- 同步任务清单 P1.5/P2/P3/P4：增加训练游标与步数提交顺序、批量分词拒绝账本、WSD/稳定性组合准入、预分词与纯张量导出条件专项、KV0-KV5 准入、后端 fail-closed、MTP 草稿事务、thinking 状态重建和离线 DPO 条件任务。
+- 明确版本治理：外层 `checkpoint_schema_version=2` 保持不变，纯文本到图像多模态只升级 `model_config_schema_version=3 -> 4`，并使用 `multimodal_schema_version=1`；正式任务状态仍以 `help/任务清单.md` 为唯一来源。
+- 完成多模态技术复核：确认现有图像 MVP 架构已覆盖值得保留的感知前端、连接层、分阶段对齐、语义/渲染解耦等通用模式，不引入新的视觉塔、语言主干或外部运行时依赖。
+- 补充结构化模态分发、有效媒体行压实执行、禁止零媒体/零值伪梯度、离线坏样本 rejection ledger、request-level 预算预检与失败回滚、单生命周期终态唯一/幂等、未来多模态 prefix sharing 完整身份和多图绑定/顺序反事实准入。
+- 收紧音频理解、语音渲染与实时会话的未来边界：原生音频能力声明项不以强制转写为唯一前置，LPT 暴露版本化 answer-channel 语义状态供 renderer 消费，声学流拓扑保持 codec 私有，同时区分文本生成结束、renderer/codec 产出结束和客户端播放确认三个水位；这些内容不进入当前 P5 配置、阶段或完成度。
+- 冻结多模态能力声明规则：只登记有限、具备实际用途和依赖关系的能力声明项，并分别记录输入/输出组合、交互模式、原生或显式级联路径及 schema/数据/训练/评测/运行时/发布状态；能力声明项与模型配置档“运行 Profile”严格区分。单组件前向、训练样本或演示结果不能推导未登记能力，也不执行无边界的模态全排列实验。
+- 补齐结构化音频输入与能力保护边界：未来 schema 必须记录媒体身份、轮次/part 绑定、有效时间、帧 mask、时间基准和融合 span；输入规范化覆盖容器/编码、声道、采样率、重采样、有限值、削波、资源上限、内容摘要和样本到特征帧映射。新增能力声明项采用隔离对齐、低学习率联合训练和全部既有能力 replay，文本/声学/终止目标绑定同一 answer span 并分别计量。
+- 补齐语音 renderer 正确性与复现边界：多声学分量只在完整可播放帧就绪后原子发布；流式解码必须保证时间区间单调、无重复/缺口、尾块至多一次 flush，并与整段解码通过一致性准入。renderer trace 绑定 bridge、renderer/codec revision、私有调度计划、各输出采样配置、seed/RNG 和分块连续性策略，不把固定流数、码本或延迟表写入 LPT 主干。
+- 补齐实时轮次事务和跨模态准入：异步图音资产先绑定 request generation/turn 并原子提交，barge-in 输入必须取消旧输出且恰好一次进入下一轮；端点基线登记 pre-roll、起止驻留/迟滞、尾部策略和 reset，不把端点后整段 prefill 宣称为流式音频编码或全双工。图像到语音分别评测媒体答案正确性和语音忠实度，混合图音输入使用逐模态替换/删除反事实；图像 MVP 同步增加合法同轮布局鲁棒性和完整轮次子样本约束。
+- 同步任务清单新增“P5 后续图音能力立项前置条件（非当前任务）”，并明确技术约束以定型方案对应章节为唯一事实源；任务清单只保留未来任务拆分、依赖和准入的浓缩摘要，不新增复选框、任务编号、配置、recipe、优先级或进度。当前已立项范围仍只有 P5 第 14 项图像输入、文本输出闭环。
+- 修正固定媒体 KV 生命周期表中的页数口径：有效媒体 token 数与物理 page 数分开统计，page 数按 `page_block_size` 向上取整，并禁止 anchor/rolling 混页。本次不改变 P5 任务范围、优先级或完成状态。
+- 复核并保留图像 MVP 的视觉 token 预算不变量；将 `kv_cache_scope` 收紧为由 schema、多模态开关和媒体策略共同决定的派生不变量，补齐 schema v4 `local_window_only`/多模态关闭分支，并要求序列化配置与 checkpoint 载入不一致时 fail closed。P4 仍以独立评估矩阵、准入报告和可回滚配置为产物，不改成模型配置字段。
+- 为定型方案正文补齐技术栈复核的四类交叉落点：P4 候选类型与最低准入指标映射，服务层 OpenAI/Anthropic/SSE 协议适配边界，first-fit/BFD packing 对照，以及复用正式推理核心的 DPO/GRPO、KL、轨迹账本与回滚契约；不新增任务编号、配置字段或完成状态。
+- 补强纯文本工程约束的可实施与可验收口径：rejection ledger 改为版本化可机读 schema，并冻结集合守恒代码断言、拒绝策略及阈值的配置与元数据落点；增量 decoder 明确生命周期状态、停止串 holdback 上界和独立 byte 缓冲；请求级资源预留与 GPU 执行 lease 分离，超时资源必须等待设备完成证明后回收；chunked LM loss 增加 recipe/CLI 参数归属及 vocab-shard 等价准入。同步要求 signal/异常/结束回调不得直接发布 checkpoint、raw/behavior logprob 完成独立 reference 测试、后训练 rollout 复用正式推理核心；不新增任务编号、模型配置字段或完成状态。
+- 进一步冻结训练与资源安全边界：`lm_head_chunk_size` 写入 checkpoint training_config/run metadata 并参与 resume 配置核对，TP 有效目标数不得随 TP world size 重复放大，fp16 scaler 与 dtype fallback 必须可恢复、可审计；GPU lease 明确所有权转移、状态迁移、设备完成证明和延迟回收，多模态 reset/error/timeout 不得绕过该约束。后训练推理核心复用要求只约束实际生成 rollout 的路径，纯离线 DPO 复用正式模型前向和统一 token/mask/logprob 契约，但不被强制生成 rollout。
+
+## 2026-08-01
+
+- 完成多模态方案双重审计（Claude Fable 5 + DeepSeek）并采纳关键建议：`inputs_embeds` 路径设计与等价测试、训练数据规划、依赖资产清单、预算 smoke 与早期基线、NaFlex 布局契约、双区 Paged KV 页分类器抽象建议。
+- MM0 契约冻结新增 4 项技术交付物：(1) `inputs_embeds` 路径设计与等价测试计划，（2）训练数据规划，（3）依赖资产清单与可复现性要求，（4）可配置视觉预算的 smoke 与早期基线。具体样本量、任务配比、依赖版本、预算档位和文件组织由 MM0 实施方案确定。
+- 配置字段补充 `kv_cache_scope` 新值：`model_config_schema_version=3` 纯文本保持 `"local_real_tokens_only"`，`model_config_schema_version=4` 多模态启用 `pinned_media_kv` 时切换为 `"local_real_tokens_plus_bounded_media"`，外层 `checkpoint_schema_version=2` 不变，需放行 `model_config.py` 硬校验。
+- NaFlex reducer 补充布局契约：确认对应的 SigLIP2-NaFlex 图像 processor 直接返回 `pixel_values / pixel_attention_mask / spatial_shapes`，方案改为直接消费并校验，MM1 用真实 processor 验证三字段对应关系并明确写入 `EncodedMediaBatch` 契约。
+- 多模态方案复核修正（针对第二次审计发现的问题）：xLSTM special-token reset 改为双路径规则（`inputs_embeds` 路径必须显式传 `memory_reset_mask`，`input_ids` 路径未传时继续从边界 token 推导，保持 v2 纯文本行为）；multimodal SFT 默认只训 projector 与 LPT LoRA/白名单低学习率参数，解冻 LPT 全参数降级为 Post-MVP 独立实验；删除未经验证的依赖版本下限和视觉预算近似结论，具体依赖与预算由 MM0 实施方案确定；任务清单明确仅加载视觉子模型（不加载 SigLIP2 文本塔）；完成报告同步修正乐观结论。
+- 多模态方案文档层级收口（第三次复核）：`MM0 契约冻结详细交付物` 压缩为五类方向性交付物，具体样本量、任务配比、版本号、预算档位、文件/脚本路径和扫描命令全部下放至 MM0 实施方案；删除 `vision_encoder` 伪代码示例（由实施方案定义接口细节）；xLSTM reset 双路径冲突策略改为 fail closed（不一致直接报错）；视觉加载表述收敛为"仅加载视觉子模型 + 配套图像 processor"，不保留完整双塔备选；两份历史审核记录文档（`ds审核结论`、`DeepSeek审计建议采纳分析`）的旧结论已确认被后续复核覆盖，相关文档已清理，不再保留。
+- 任务清单 P5 第 14.1/MM0 同步新增 5 项交付物，确保方案与任务完全对齐。
+- 完成多模态方案审计复核：确认视觉 reducer、两区 Paged KV 生命周期、`model_config_schema_version=3 -> 4` 的显式派生、外层 `checkpoint_schema_version=2` 保持不变、InferenceSession 媒体字段、MM0-MM4 完成定义、长图文场景和量化准入属于有效补缺项，并同步到主方案与 P5 任务清单。
+- 明确 `google/siglip2-so400m-patch16-naflex` 的 1152 专指 SigLIP2 SO400M Patch16 NaFlex 视觉编码器输出的特征嵌入维度；加载时必须与实际 encoder config 严格校验，projector 再映射到 LPT 语言主干的 `hidden_size`。
+- 审计建议中，纯文本 chat 强制转换为 `multimodal_chat` 不纳入正式任务，纯文本 replay 继续使用现有 `chat` schema；质量和成本门槛不写死为跨数据集固定百分比，改为 MM0 在 eval manifest 中登记有限数值阈值、比较方向和统计方法。
 
 ## 2026-05-14
 
