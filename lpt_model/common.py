@@ -35,23 +35,6 @@ class RMSNorm(nn.Module):
         return x * torch.rsqrt(variance + self.eps) * self.weight
 
 
-class SwiGLU(nn.Module):
-    """Swish-Gated Linear Unit 前馈网络。"""
-
-    def __init__(self, hidden_size):
-        """创建 SwiGLU 三投影结构，intermediate_size 对齐到 256。"""
-        super().__init__()
-        intermediate_size = int(8 * hidden_size / 3)
-        intermediate_size = ((intermediate_size + 255) // 256) * 256
-        self.w1 = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.w2 = nn.Linear(intermediate_size, hidden_size, bias=False)
-        self.w3 = nn.Linear(hidden_size, intermediate_size, bias=False)
-
-    def forward(self, x):
-        """执行 SwiGLU: w2(silu(w1(x)) * w3(x))。"""
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
-
-
 def build_position_ids(attention_mask):
     """按 attention_mask 生成从 0 开始的紧凑位置 id。"""
     return attention_mask.long().cumsum(dim=-1).sub(1).clamp_min(0)

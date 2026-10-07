@@ -2,12 +2,14 @@
 
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 import json
 from pathlib import Path
 import random
 
-from torch.utils.data import IterableDataset
+from torch.utils.data import IterableDataset, get_worker_info
 
+from .cache import JSONLReaderPool
 from .schema import normalize_dataset_record
 
 
@@ -28,6 +30,22 @@ class ManifestEntryPlan:
     base_indices: tuple[int, ...] | None
     extra_indices: tuple[int, ...]
     selected_count: int
+
+
+def _estimate_entry_plan_work(entry_plan):
+    """按被选样本比例估算文件读取与分词工作量。"""
+    selected_count = max(0, int(entry_plan.selected_count))
+    source_count = max(0, int(entry_plan.source_record_count))
+    try:
+        source_bytes = max(0, int(Path(entry_plan.path).stat().st_size))
+    except OSError:
+        source_bytes = source_count
+    if selected_count <= 0:
+        return 0
+    if source_count <= 0:
+        return max(1, selected_count)
+    # weight > 1 时 selected_count/source_count 会自然计入重复训练开销。
+    return max(1, source_bytes * selected_count // source_count)
 
 
 class StreamingManifestDataset(IterableDataset):
@@ -58,6 +76,10 @@ class StreamingManifestDataset(IterableDataset):
         self.total_count = int(total_count)
         self.seed = seed
         self._iteration_index = 0
+        self._entry_plan_work_estimates = {
+            int(entry_plan.entry_index): _estimate_entry_plan_work(entry_plan)
+            for entry_plan in self.entry_plans
+        }
 
     def __len__(self):
         """返回按 manifest weight/sample_limit 展开后的样本数。"""
@@ -71,9 +93,16 @@ class StreamingManifestDataset(IterableDataset):
         self._iteration_index += 1
         return current_seed
 
-    def _iter_manifest_records(self, *, include_progress_metadata=True):
-        """按 entry plan 顺序流式产出被选中的记录。"""
-        for entry_plan in self.entry_plans:
+    def _iter_manifest_records(
+        self,
+        *,
+        include_progress_metadata=True,
+        entry_plans=None,
+        reader_pool=None,
+    ):
+        """按给定 entry plan 顺序流式产出被选中的记录。"""
+        selected_entry_plans = self.entry_plans if entry_plans is None else tuple(entry_plans)
+        for entry_plan in selected_entry_plans:
             sample_ordinal = 0
             if entry_plan.repeat_count > 0:
                 for repeat_index in range(entry_plan.repeat_count):
@@ -81,6 +110,7 @@ class StreamingManifestDataset(IterableDataset):
                         entry_plan.path,
                         entry_plan.base_indices,
                         expected_types=self.expected_types,
+                        reader_pool=reader_pool,
                     ):
                         if include_progress_metadata:
                             yield _attach_progress_metadata(
@@ -100,6 +130,7 @@ class StreamingManifestDataset(IterableDataset):
                         entry_plan.path,
                         entry_plan.extra_indices,
                         expected_types=self.expected_types,
+                        reader_pool=reader_pool,
                     )
                 ):
                     if include_progress_metadata:
@@ -119,11 +150,60 @@ class StreamingManifestDataset(IterableDataset):
         """提供不影响训练 shuffle seed 的顺序扫描入口。"""
         yield from self._iter_manifest_records(include_progress_metadata=False)
 
-    def iter_records_for_epoch(self, epoch_index):
-        """按指定 epoch 产出带来源元数据的训练样本。"""
-        rng = random.Random(self._seed_for_epoch(epoch_index))
+    def _entry_plans_for_current_worker(self):
+        """按预计处理字节数把文件确定性均衡到当前 DataLoader worker。"""
+        active_entry_plans = tuple(
+            entry_plan
+            for entry_plan in self.entry_plans
+            if int(entry_plan.selected_count) > 0
+        )
+        worker_info = get_worker_info()
+        if worker_info is None or int(worker_info.num_workers) <= 1:
+            return active_entry_plans, 0
+
+        worker_id = int(worker_info.id)
+        worker_count = int(worker_info.num_workers)
+        assignments = [[] for _ in range(worker_count)]
+        assignment_loads = [0 for _ in range(worker_count)]
+        # 先放置预计工作量最大的文件，再选择当前最空闲的 worker。这样既保证每个
+        # JSONL 只由一个进程打开，也避免少数超大文件让轮转分片退化成单核尾部。
+        ordered_plans = sorted(
+            active_entry_plans,
+            key=lambda entry_plan: (
+                -int(self._entry_plan_work_estimates[int(entry_plan.entry_index)]),
+                int(entry_plan.entry_index),
+            ),
+        )
+        for entry_plan in ordered_plans:
+            target_worker = min(
+                range(worker_count),
+                key=lambda index: (assignment_loads[index], index),
+            )
+            assignments[target_worker].append(entry_plan)
+            assignment_loads[target_worker] += int(
+                self._entry_plan_work_estimates[int(entry_plan.entry_index)]
+            )
+        selected_plans = tuple(
+            sorted(assignments[worker_id], key=lambda entry_plan: int(entry_plan.entry_index))
+        )
+        return selected_plans, worker_id
+
+    def iter_records_for_epoch(self, epoch_index, *, reader_pool=None):
+        """按指定 epoch 产出带来源元数据的训练样本。
+
+        ``reader_pool`` 只服务于未启用 token cache 时的 JSONL 回退路径
+        （由训练管线注入，把 JSON 解析分散到多进程）；token cache 数据集
+        不使用该参数，直接走 mmap。
+        """
+        entry_plans, worker_id = self._entry_plans_for_current_worker()
+        worker_seed = self._seed_for_epoch(epoch_index) + worker_id * 1_000_003
+        rng = random.Random(worker_seed)
         yield from _iter_buffer_shuffled_records(
-            self._iter_manifest_records(include_progress_metadata=True),
+            self._iter_manifest_records(
+                include_progress_metadata=True,
+                entry_plans=entry_plans,
+                reader_pool=reader_pool,
+            ),
             buffer_size=self.shuffle_buffer_size,
             rng=rng,
         )
@@ -141,14 +221,14 @@ class StreamingManifestDataset(IterableDataset):
         yield from self.iter_records_for_epoch(current_iteration)
 
 
-def _attach_progress_metadata(record, entry_plan, *, record_index, sample_ordinal, pass_index, pass_kind):
+def attach_progress_metadata(record, entry_plan, *, record_index, sample_ordinal, pass_index, pass_kind):
     """给训练样本附加不可见的来源进度元数据，供 checkpoint 记录数据进度。"""
     enriched_record = dict(record)
     enriched_record[DATA_PROGRESS_RECORD_KEY] = {
         "entry_index": int(entry_plan.entry_index),
         "entry_name": entry_plan.name,
-        "entry_key": _entry_progress_key(entry_plan.name, entry_plan.path),
-        "path": _progress_path_string(entry_plan.path),
+        "entry_key": entry_progress_key(entry_plan.name, entry_plan.path),
+        "path": progress_path_string(entry_plan.path),
         "line_index": int(record_index),
         "sample_ordinal": int(sample_ordinal),
         "pass_index": int(pass_index),
@@ -157,7 +237,11 @@ def _attach_progress_metadata(record, entry_plan, *, record_index, sample_ordina
     return enriched_record
 
 
-def _progress_path_string(path):
+_attach_progress_metadata = attach_progress_metadata
+
+
+@lru_cache(maxsize=8192)
+def progress_path_string(path):
     """把数据进度路径规范化为项目相对 POSIX 路径。"""
     path = Path(path)
     project_root = Path.cwd().resolve()
@@ -168,25 +252,44 @@ def _progress_path_string(path):
         return path.as_posix()
 
 
-def _entry_progress_key(entry_name, dataset_path):
+_progress_path_string = progress_path_string
+
+
+def entry_progress_key(entry_name, dataset_path):
     """生成数据进度使用的稳定 entry key。"""
-    return _progress_path_string(dataset_path)
+    return progress_path_string(dataset_path)
 
 
-def _iter_selected_records_with_index(dataset_path, selected_indices, expected_types):
+_entry_progress_key = entry_progress_key
+
+
+def _iter_selected_records_with_index(
+    dataset_path,
+    selected_indices,
+    expected_types,
+    *,
+    reader_pool=None,
+):
     """按索引过滤 JSONL 记录，并保留原始记录索引。"""
     selected_index_set = None if selected_indices is None else set(selected_indices)
+    if reader_pool is not None:
+        for parsed_record in reader_pool.iter_records(paths=(dataset_path,)):
+            record_index = int(parsed_record.metadata.record_index)
+            if selected_index_set is None or record_index in selected_index_set:
+                yield record_index, parsed_record.record
+        return
     for record_index, record in _iter_dataset_records_with_index(dataset_path, expected_types=expected_types):
         if selected_index_set is None or record_index in selected_index_set:
             yield record_index, record
 
 
-def _iter_selected_records(dataset_path, selected_indices, expected_types):
+def _iter_selected_records(dataset_path, selected_indices, expected_types, *, reader_pool=None):
     """按索引过滤 JSONL 记录；selected_indices=None 表示全量读取。"""
     for _, record in _iter_selected_records_with_index(
         dataset_path,
         selected_indices,
         expected_types,
+        reader_pool=reader_pool,
     ):
         yield record
 
@@ -237,12 +340,15 @@ def summarize_dataset_sources(records):
     return dict(sorted(counter.items()))
 
 
-def _resolve_manifest_dataset_path(manifest_path, dataset_path):
+def resolve_manifest_dataset_path(manifest_path, dataset_path):
     """把 manifest 内相对路径解析到 manifest 所在目录下。"""
     resolved_path = Path(dataset_path)
     if resolved_path.is_absolute():
         return resolved_path
     return manifest_path.parent / resolved_path
+
+
+_resolve_manifest_dataset_path = resolve_manifest_dataset_path
 
 
 def _deterministic_pick(records, target_count, seed_text):
@@ -294,7 +400,7 @@ def _apply_dataset_entry_policy(records, entry, *, seed_text):
     return repeated_records
 
 
-def _load_manifest_entries(manifest_path):
+def load_manifest_entries(manifest_path):
     """读取 manifest 并返回 datasets 条目列表。"""
     manifest_path = Path(manifest_path)
     with manifest_path.open("r", encoding="utf-8") as manifest_file:
@@ -306,6 +412,9 @@ def _load_manifest_entries(manifest_path):
     return manifest_path, dataset_entries
 
 
+_load_manifest_entries = load_manifest_entries
+
+
 def _normalize_weight(weight):
     """校验并归一化 manifest weight。"""
     if not isinstance(weight, (int, float)) or weight < 0:
@@ -313,8 +422,21 @@ def _normalize_weight(weight):
     return float(weight)
 
 
-def _count_dataset_records(dataset_path, expected_types):
+def _count_dataset_records(
+    dataset_path,
+    expected_types,
+    *,
+    reader_pool=None,
+    count_provider=None,
+):
     """只扫描记录数量，不把数据集整体加载进内存。"""
+    if count_provider is not None:
+        return int(count_provider(dataset_path))
+    if reader_pool is not None:
+        return sum(
+            1
+            for _ in reader_pool.iter_records(paths=(dataset_path,))
+        )
     total_count = 0
     for _, _ in _iter_dataset_records_with_index(dataset_path, expected_types=expected_types):
         total_count += 1
@@ -347,7 +469,15 @@ def _pick_from_base_selection(base_indices, base_count, total_count, target_coun
     return tuple(base_indices[position] for position in picked_positions)
 
 
-def _build_manifest_entry_plan(manifest_path, entry_index, entry, expected_types):
+def _build_manifest_entry_plan(
+    manifest_path,
+    entry_index,
+    entry,
+    expected_types,
+    *,
+    reader_pool=None,
+    count_provider=None,
+):
     """把单个 manifest entry 编译成可流式执行的采样计划。"""
     dataset_path = entry.get("path")
     if not isinstance(dataset_path, str) or not dataset_path.strip():
@@ -372,7 +502,12 @@ def _build_manifest_entry_plan(manifest_path, entry_index, entry, expected_types
             selected_count=0,
         )
 
-    total_count = _count_dataset_records(resolved_dataset_path, expected_types=expected_types)
+    total_count = _count_dataset_records(
+        resolved_dataset_path,
+        expected_types=expected_types,
+        reader_pool=reader_pool,
+        count_provider=count_provider,
+    )
 
     base_indices = None
     base_count = total_count
@@ -425,17 +560,39 @@ def _build_manifest_entry_plan(manifest_path, entry_index, entry, expected_types
     )
 
 
-def _summarize_entry_plan(entry_plan, expected_types):
+def _summarize_entry_plan(
+    entry_plan,
+    expected_types,
+    *,
+    reader_pool=None,
+    summary_provider=None,
+):
     """根据 entry plan 重新扫描并统计类型/来源分布。"""
     if entry_plan.selected_count == 0:
         return Counter(), Counter()
+    if summary_provider is not None:
+        type_counter, source_counter = summary_provider(entry_plan)
+        return Counter(type_counter), Counter(source_counter)
 
     type_counter = Counter()
     source_counter = Counter()
     base_index_set = None if entry_plan.base_indices is None else set(entry_plan.base_indices)
     extra_index_set = set(entry_plan.extra_indices)
 
-    for record_index, record in _iter_dataset_records_with_index(entry_plan.path, expected_types=expected_types):
+    record_iterator = (
+        _iter_selected_records_with_index(
+            entry_plan.path,
+            None,
+            expected_types,
+            reader_pool=reader_pool,
+        )
+        if reader_pool is not None
+        else _iter_dataset_records_with_index(
+            entry_plan.path,
+            expected_types=expected_types,
+        )
+    )
+    for record_index, record in record_iterator:
         base_selected = base_index_set is None or record_index in base_index_set
         if entry_plan.repeat_count > 0 and base_selected:
             type_counter[record["type"]] += entry_plan.repeat_count
@@ -447,7 +604,7 @@ def _summarize_entry_plan(entry_plan, expected_types):
     return type_counter, source_counter
 
 
-def _iter_buffer_shuffled_records(records, buffer_size, rng):
+def iter_buffer_shuffled_records(records, buffer_size, rng):
     """有限缓冲区 shuffle，兼顾流式读取和近似随机化。"""
     if buffer_size <= 1:
         yield from records
@@ -468,16 +625,24 @@ def _iter_buffer_shuffled_records(records, buffer_size, rng):
     yield from buffer
 
 
-def build_streaming_manifest_dataset(
-    manifest_path,
-    *,
-    expected_types=None,
-    shuffle_buffer_size=1024,
-    seed=None,
-):
-    """构造流式 manifest 数据集，避免把所有样本一次性加载进内存。"""
-    manifest_path, dataset_entries = _load_manifest_entries(manifest_path)
+_iter_buffer_shuffled_records = iter_buffer_shuffled_records
 
+
+def build_manifest_dataset_plan(
+    manifest_path,
+    expected_types=None,
+    *,
+    count_provider=None,
+    summary_provider=None,
+):
+    """把 manifest 编译成不绑定读取后端的采样计划与统计信息。
+
+    ``count_provider(dataset_path)`` 返回源文件记录数；``summary_provider(
+    entry_plan)`` 返回 ``(type_counter, source_counter)``。JSONL 流式后端传
+    ``None`` 时按原逻辑同步扫描；token cache 后端可传入 mmap 快速实现，
+    避免启动阶段顺序解析大 JSONL 造成的单核阻塞。
+    """
+    manifest_path, dataset_entries = _load_manifest_entries(manifest_path)
     entry_plans = []
     loaded_datasets = []
     global_type_counter = Counter()
@@ -495,11 +660,12 @@ def build_streaming_manifest_dataset(
             entry_index,
             entry,
             expected_types=expected_types,
+            count_provider=count_provider,
         )
-        # summary 单独扫描一遍，是为了让训练入口在流式模式下仍能展示数据类型/来源分布。
         entry_type_counter, entry_source_counter = _summarize_entry_plan(
             entry_plan,
             expected_types=expected_types,
+            summary_provider=summary_provider,
         )
 
         entry_plans.append(entry_plan)
@@ -520,14 +686,93 @@ def build_streaming_manifest_dataset(
     if total_count == 0:
         raise ValueError(f"manifest 未加载到任何样本: {manifest_path}")
 
+    return (
+        tuple(entry_plans),
+        loaded_datasets,
+        dict(sorted(global_type_counter.items())),
+        dict(sorted(global_source_counter.items())),
+        int(total_count),
+    )
+
+
+def build_streaming_manifest_dataset(
+    manifest_path,
+    *,
+    expected_types=None,
+    shuffle_buffer_size=1024,
+    seed=None,
+    reader_num_workers=0,
+    reader_chunk_bytes=32 * 1024 * 1024,
+):
+    """构造流式 manifest 数据集，避免把所有样本一次性加载进内存。
+
+    ``reader_num_workers`` 同时用于启动阶段的 count/summary 扫描和训练期
+    的 JSONL reader。进程池只在本函数扫描期间存活；训练期会按 dataset
+    entry 再建立一个可复用 pool，避免把 executor 放进 IterableDataset 的
+    pickle 状态。
+    """
+    manifest_path, dataset_entries = _load_manifest_entries(manifest_path)
+
+    candidate_paths = []
+    for entry in dataset_entries:
+        if isinstance(entry, dict) and entry.get("enabled", True) is not False:
+            dataset_path = entry.get("path")
+            if isinstance(dataset_path, str) and dataset_path.strip():
+                candidate_paths.append(_resolve_manifest_dataset_path(manifest_path, dataset_path))
+    unique_paths = tuple(dict.fromkeys(Path(path) for path in candidate_paths))
+    reader_pool = None
+    if int(reader_num_workers) > 0 and unique_paths:
+        reader_pool = JSONLReaderPool(
+            unique_paths,
+            expected_types=expected_types,
+            num_workers=int(reader_num_workers),
+            chunk_bytes=int(reader_chunk_bytes),
+        )
+    try:
+        (
+            entry_plans,
+            loaded_datasets,
+            summary_types,
+            summary_sources,
+            total_count,
+        ) = build_manifest_dataset_plan(
+            manifest_path,
+            expected_types=expected_types,
+            count_provider=(
+                None
+                if reader_pool is None
+                else (
+                    lambda path: _count_dataset_records(
+                        path,
+                        expected_types,
+                        reader_pool=reader_pool,
+                    )
+                )
+            ),
+            summary_provider=(
+                None
+                if reader_pool is None
+                else (
+                    lambda plan: _summarize_entry_plan(
+                        plan,
+                        expected_types,
+                        reader_pool=reader_pool,
+                    )
+                )
+            ),
+        )
+    finally:
+        if reader_pool is not None:
+            reader_pool.close()
+
     return StreamingManifestDataset(
         manifest_path=manifest_path,
         entry_plans=entry_plans,
         expected_types=expected_types,
         shuffle_buffer_size=shuffle_buffer_size,
         loaded_datasets=loaded_datasets,
-        summary_types=dict(sorted(global_type_counter.items())),
-        summary_sources=dict(sorted(global_source_counter.items())),
+        summary_types=summary_types,
+        summary_sources=summary_sources,
         total_count=total_count,
         seed=seed,
     )

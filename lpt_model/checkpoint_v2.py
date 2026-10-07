@@ -90,6 +90,7 @@ def _state_schema_metadata(config):
             "num_experts": config.moe_num_experts,
             "top_k": config.moe_top_k,
             "router_dtype": config.moe_router_dtype,
+            "expert_weight_layout": config.moe_expert_weight_layout,
         },
         "xlstm_memory_state": {
             "state_type": "xlstm_memory_state",
@@ -172,6 +173,11 @@ def validate_lpt_v2_checkpoint_payload(checkpoint):
     state_schema = runtime_metadata.get("state_schema", {})
     if state_schema.get("layer_state_schema") != "LayerStateV2":
         raise ValueError("checkpoint state_schema 不是 LayerStateV2。")
+    moe_state = state_schema.get("moe_state", {})
+    if not isinstance(moe_state, dict):
+        raise ValueError("checkpoint state_schema.moe_state 必须是字典。")
+    if moe_state.get("expert_weight_layout") != config.moe_expert_weight_layout:
+        raise ValueError("checkpoint state_schema.moe_state.expert_weight_layout 与 model_config 不一致。")
     return config
 
 

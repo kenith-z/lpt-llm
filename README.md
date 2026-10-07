@@ -104,6 +104,14 @@ README 只作为项目入口、主线边界和目录导航。
 
 JSON 样本的 assistant `content` 不应混入解释性文本或 Markdown 代码块；需要工具调用时使用 assistant 的结构化 `tool_calls` 字段，而不是把工具调用伪装成普通 JSON 回答。
 
+记录外层字段约定：
+
+- `text` 样本只保留 `type`、`text`、`id`、`source`。
+- `chat` 样本只保留 `type`、`messages`、`id`、`source`。
+- `id` 不参与训练，仅用于来源识别与训练进度追踪，应保留。
+- 其他最外层字段（如 `split`、`language`、`category`、`source_path`、`metadata`）均不参与训练，属于冗余字段，应通过 `tools/clean_structured_datasets.py` 清理，保证数据集简洁规整并节省磁盘空间。
+- `messages` 内的元素只允许 `role`、`content`、`thinking`（仅 assistant）、`tool_calls`（仅 assistant）、`tool_call_id`（仅 observation）；多余的消息内字段会在数据加载规范化时被丢弃，清理脚本不修改消息内部。
+
 
 ## 项目定位
 

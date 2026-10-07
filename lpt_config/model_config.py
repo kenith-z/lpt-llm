@@ -17,7 +17,9 @@ from .constants import (
 
 
 # 当前支持的 ModelConfig JSON schema 版本；checkpoint 加载时必须严格匹配。
-MODEL_CONFIG_SCHEMA_VERSION = 3
+MODEL_CONFIG_SCHEMA_VERSION = 4
+# MoE expert 参数采用按 expert 维度堆叠的 grouped GEMM 权重布局。
+MOE_EXPERT_WEIGHT_LAYOUT = "grouped_stacked_v1"
 # LPT v2 独立分支架构标识，是 v2 checkpoint 与配置的主入口。
 LPT_V2_ARCHITECTURE_VERSION = "lpt_v2"
 # LPT v2 block 类型，约束每层使用 Attention 主干 + RetNetAssist Q adapter。
@@ -383,6 +385,8 @@ class ModelConfig:
     moe_top_k: int = DEFAULT_MODEL_SIZE_PRESET_VALUES["moe_top_k"]
     # MoE router logits dtype；固定 FP32 以保证路由稳定。
     moe_router_dtype: str = "fp32"
+    # MoE expert 权重布局；schema v4 固定为 grouped GEMM 所需的堆叠布局。
+    moe_expert_weight_layout: str = MOE_EXPERT_WEIGHT_LAYOUT
     # 是否启用 MoE load balance loss。
     moe_load_balance_loss_enabled: bool = True
     # 是否启用 router z-loss。
@@ -571,6 +575,7 @@ class ModelConfig:
         object.__setattr__(self, "moe_num_experts", int(self.moe_num_experts))
         object.__setattr__(self, "moe_top_k", int(self.moe_top_k))
         object.__setattr__(self, "moe_router_dtype", str(self.moe_router_dtype))
+        object.__setattr__(self, "moe_expert_weight_layout", str(self.moe_expert_weight_layout))
         object.__setattr__(
             self,
             "moe_load_balance_loss_enabled",
@@ -860,6 +865,10 @@ class ModelConfig:
             raise ValueError("moe_top_k 必须在 1 到 moe_num_experts 之间。")
         if self.moe_router_dtype != "fp32":
             raise ValueError("moe_router_dtype 当前必须是 fp32。")
+        if self.moe_expert_weight_layout != MOE_EXPERT_WEIGHT_LAYOUT:
+            raise ValueError(
+                f"moe_expert_weight_layout 当前必须是 {MOE_EXPERT_WEIGHT_LAYOUT}。"
+            )
         if self.moe_router_input_mode not in {"memory_augmented_input", "ffn_norm_only_eval"}:
             raise ValueError("moe_router_input_mode 必须是 memory_augmented_input 或 ffn_norm_only_eval。")
 
@@ -990,7 +999,12 @@ class ModelConfig:
                 "不支持的 model_config_schema_version: "
                 f"{config_schema_version}，当前仅支持 {MODEL_CONFIG_SCHEMA_VERSION}。"
             )
-        return cls.from_dict(payload["model_config"])
+        model_config_payload = payload["model_config"]
+        if not isinstance(model_config_payload, dict):
+            raise TypeError("model config JSON 载荷中的 model_config 必须是字典。")
+        if "moe_expert_weight_layout" not in model_config_payload:
+            raise ValueError("schema4 model config 缺少 moe_expert_weight_layout。")
+        return cls.from_dict(model_config_payload)
 
     @classmethod
     def load_json(cls, path):
@@ -1056,6 +1070,10 @@ def build_model_config_from_checkpoint(checkpoint):
     model_config_payload = checkpoint.get("model_config")
     if model_config_payload is None:
         raise ValueError("checkpoint 缺少 model_config 快照。")
+    if not isinstance(model_config_payload, dict):
+        raise TypeError("checkpoint.model_config 必须是字典。")
+    if "moe_expert_weight_layout" not in model_config_payload:
+        raise ValueError("schema4 checkpoint 缺少 moe_expert_weight_layout。")
     return ModelConfig.from_dict(model_config_payload)
 
 

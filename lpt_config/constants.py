@@ -37,7 +37,7 @@ LPT_V2_BASE_PRESET = "lpt_v2_base"
 # large 规格：用于后续放大验证，不作为默认 smoke 目标。
 LPT_V2_LARGE_PRESET = "lpt_v2_large"
 # 默认规格必须与 README/help 中的 v2 主线保持一致。
-DEFAULT_MODEL_SIZE_PRESET = LPT_V2_SMALL_BASE_PRESET
+DEFAULT_MODEL_SIZE_PRESET = LPT_V2_DEV_TINY_PRESET
 
 # bootstrap profile：最小可运行主干，用于排除 MoE/状态辅助模块之外的基础问题。
 LPT_V2_BOOTSTRAP_PROFILE = "lpt_v2_bootstrap"
@@ -69,8 +69,6 @@ DEFAULT_DEVICE = "auto"
 DEFAULT_DTYPE = "auto"
 # 通用训练阶段名，具体三阶段 recipe 会覆盖为 text_pretrain/chat_sft/chat_lora。
 DEFAULT_TRAINING_STAGE = "train"
-# 通用 batch size 默认值；阶段 recipe 会按任务覆盖。
-DEFAULT_TRAINING_BATCH_SIZE = 1
 # 通用 epoch 默认值，保持 smoke 和小样本训练不会意外长跑。
 DEFAULT_TRAINING_EPOCHS = 1
 # None 表示不额外限制训练步数，由数据集大小和 epoch 决定。
@@ -79,10 +77,18 @@ DEFAULT_TRAINING_MAX_STEPS = None
 DEFAULT_TRAINING_LEARNING_RATE = 1e-4
 # AdamW weight decay 默认值；optimizer 会自动排除 norm/bias/低维参数。
 DEFAULT_WEIGHT_DECAY = 0.1
+# 优化器类型：adamw（标准 fp32 优化器状态）或 adamw8bit（8bit 量化优化器状态，需要 bitsandbytes 库）。
+DEFAULT_OPTIMIZER_TYPE = "adamw8bit"
+# 是否启用梯度检查点（Gradient Checkpointing）以节省激活值显存；启用后训练速度降低 10-20%。
+DEFAULT_GRADIENT_CHECKPOINTING = True
 # 梯度累积步数默认值；1 表示每个 batch 都执行一次 optimizer step。
 DEFAULT_GRADIENT_ACCUMULATION_STEPS = 1
 # 梯度裁剪阈值，防止小模型/长序列 smoke 中出现异常梯度峰值。
 DEFAULT_MAX_GRAD_NORM = 1.0
+# LM loss 分块 token 数：每块计算 cross_entropy 并累加，控制大 vocab 下
+# logits 临时张量的峰值显存（chunk_tokens x vocab）。256 是显存安全值；
+# 显存充足时可调大（如 512/1024）以减少小 kernel 调度、提升 GPU 利用率。
+DEFAULT_LM_LOSS_CHUNK_TOKENS = 1024
 # warmup 占总训练步数比例，训练步数可估计时用于构造 warmup+cosine schedule。
 DEFAULT_WARMUP_RATIO = 0.03
 # 固定随机种子，保证 smoke test、基线报告和窗口采样可复现。
@@ -91,6 +97,31 @@ DEFAULT_TRAINING_SEED = 20260503
 DEFAULT_DETERMINISTIC_ALGORITHMS = True
 # 默认启用 sequence packing，提高短样本训练的 token 利用率。
 DEFAULT_SEQUENCE_PACKING_ENABLED = True
+# 训练 batch 预处理默认 worker 数；Windows 正式训练建议从 4 个 worker 起步，
+# CPU smoke 和单元测试可通过 recipe/CLI 显式覆盖为 0。
+DEFAULT_DATA_NUM_WORKERS = 8
+# 每个预处理 worker 默认预取的 batch 数。
+DEFAULT_DATA_PREFETCH_FACTOR = 2
+# 多进程 DataLoader 默认跨 epoch 复用 worker，避免重复创建进程。
+DEFAULT_DATA_PERSISTENT_WORKERS = True
+# CUDA 训练默认使用锁页内存，配合异步 H2D 拷贝减少 GPU 等待。
+DEFAULT_DATA_PIN_MEMORY = True
+# 原始 JSONL reader 默认 worker 数。它与 batch 预处理 worker 分开，避免
+# 主进程逐行 json.loads 成为单核瓶颈；设为 0 可回退到同步 reader。
+DEFAULT_DATA_READER_NUM_WORKERS = 8
+# reader 按完整 JSONL 行切分的字节块大小。较小的块能降低单个 future 的
+# 返回峰值内存，较大的块则减少进程间调度开销。
+DEFAULT_DATA_READER_CHUNK_BYTES = 8 * 1024 * 1024
+# 有界长度排序窗口；0 表示保持原始 batch 顺序。first-fit packing 已经按
+# 容量装箱，额外把长样本聚到同一批会抬高瞬时显存，因此默认保持原顺序。
+DEFAULT_DATA_LENGTH_BUCKET_WINDOW = 0
+# sequence packing 的装箱策略；first_fit 能减少不同长度样本造成的容量碎片。
+DEFAULT_DATA_PACKING_STRATEGY = "first_fit"
+# 离线 token cache 根目录；cache manifest 内含源文件指纹与 tokenizer 指纹，
+# 源文件未变时训练启动直接 mmap 复用，不再顺序解析大 JSONL。
+DEFAULT_TOKEN_CACHE_DIR = Path("data/caches")
+# 通用阶段默认不启用 token cache（chat 模板编码需要 encode_fn 支持）。
+DEFAULT_TOKEN_CACHE_ENABLED = False
 # 控制台/JSONL/TensorBoard 训练指标写入间隔。
 DEFAULT_LOG_INTERVAL_STEPS = 10
 # 0 表示默认不做周期性 eval，避免无 eval manifest 时入口误跑。
@@ -127,26 +158,25 @@ CHAT_SFT_ARTIFACT_DIR = ARTIFACT_ROOT_DIR / "chat_sft"
 # chat_lora 阶段默认产物目录。
 CHAT_LORA_ARTIFACT_DIR = ARTIFACT_ROOT_DIR / "chat_lora"
 
-# text_pretrain 默认 batch size，作为 recipe 默认值，CLI 可覆盖。
-TEXT_PRETRAIN_BATCH_SIZE = 1
 # text_pretrain 默认 epoch 数。
 TEXT_PRETRAIN_EPOCHS = 1
 # text_pretrain 默认学习率。
 TEXT_PRETRAIN_LEARNING_RATE = 3e-4
 # text_pretrain 默认 warmup 比例。
 TEXT_PRETRAIN_WARMUP_RATIO = 0.1
+# text 预训练默认启用离线 token cache，解决大 JSONL 启动扫描导致单核阻塞。
+TEXT_PRETRAIN_TOKEN_CACHE_ENABLED = True
+# chat 两阶段共享预编码缓存实现，分别使用独立目录以便单独管理。
+CHAT_SFT_TOKEN_CACHE_ENABLED = True
+CHAT_LORA_TOKEN_CACHE_ENABLED = True
 
-# chat_sft 默认 batch size。
-CHAT_SFT_BATCH_SIZE = 1
 # chat_sft 默认 epoch 数。
-CHAT_SFT_EPOCHS = 1
+CHAT_SFT_EPOCHS = 2
 # chat_sft 默认学习率。
 CHAT_SFT_LEARNING_RATE = 3e-4
 # chat_sft 默认 warmup 比例。
 CHAT_SFT_WARMUP_RATIO = 0.1
 
-# chat_lora 默认 batch size；LoRA 只训练 adapter，通常可用更大的 batch。
-CHAT_LORA_BATCH_SIZE = 10
 # chat_lora 默认 epoch 数。
 CHAT_LORA_EPOCHS = 1
 # chat_lora 默认学习率；adapter 参数量小，默认学习率高于全量训练。

@@ -154,48 +154,81 @@ class LongRoPE2RotaryPositionEncoding(nn.Module):
         if state_is_rescaled != is_rescaled:
             raise ValueError("LongRoPE2 跨越原始上下文阈值后需要重建 layer_states。")
 
-    def _forward_cos_sin(self, embedding, q, position_ids):
+    def _forward_cos_sin(self, embedding, q, position_ids, sequence_length=None):
         """调用底层 LongRoPE 组件，取出 cos/sin 缓存。"""
-        seq_len = position_ids.max().item() + 1
+        seq_len = (
+            int(sequence_length)
+            if sequence_length is not None
+            else int(position_ids.max().item()) + 1
+        )
         return embedding(q, position_ids, seq_len=seq_len)
 
-    def _lookup_mixed_cos_sin(self, q, position_ids):
+    def _lookup_mixed_cos_sin(self, q, position_ids, sequence_length=None):
         """mixed 模式下按 position_ids 划分原始窗口与长窗区域。"""
         original_cos, original_sin = self._forward_cos_sin(
             self.original_embedding,
             q,
             position_ids,
+            sequence_length=sequence_length,
         )
         long_cos, long_sin = self._forward_cos_sin(
             self.long_embedding,
             q,
             position_ids,
+            sequence_length=sequence_length,
         )
         original_window_mask = position_ids.lt(self.mixed_original_window).unsqueeze(-1)
         cos = torch.where(original_window_mask, original_cos, long_cos)
         sin = torch.where(original_window_mask, original_sin, long_sin)
         return cos, sin
 
-    def _lookup_rescaled_cos_sin(self, q, position_ids):
+    def _lookup_rescaled_cos_sin(self, q, position_ids, sequence_length=None):
         """在 dynamic / mixed / static 三类 rescaled 策略之间选择。"""
         if self.embedding_mode == LONGROPE2_DYNAMIC_EMBEDDING_MODE:
-            return self._forward_cos_sin(self.dynamic_embedding, q, position_ids)
+            return self._forward_cos_sin(
+                self.dynamic_embedding,
+                q,
+                position_ids,
+                sequence_length=sequence_length,
+            )
         if self.embedding_mode == LONGROPE2_MIXED_EMBEDDING_MODE:
-            return self._lookup_mixed_cos_sin(q, position_ids)
-        return self._forward_cos_sin(self.long_embedding, q, position_ids)
+            return self._lookup_mixed_cos_sin(
+                q,
+                position_ids,
+                sequence_length=sequence_length,
+            )
+        return self._forward_cos_sin(
+            self.long_embedding,
+            q,
+            position_ids,
+            sequence_length=sequence_length,
+        )
 
-    def _lookup_cos_sin(self, q, position_ids):
+    def _lookup_cos_sin(self, q, position_ids, sequence_length=None):
         """统一处理短窗、长窗和缓存上限检查。"""
-        if position_ids.max().item() >= self.max_seq_len:
+        if sequence_length is None:
+            sequence_length = int(position_ids.max().item()) + 1
+        else:
+            sequence_length = int(sequence_length)
+        if sequence_length > self.max_seq_len:
             raise ValueError(
                 f"位置索引超出了 LongRoPE2 缓存上限 ({self.max_seq_len})，"
                 "请增大当前运行场景的 RoPE 缓存上限。"
             )
 
-        if self.should_use_rescaled_rope(position_ids=position_ids):
-            cos, sin = self._lookup_rescaled_cos_sin(q, position_ids)
+        if self.should_use_rescaled_rope(sequence_length=sequence_length):
+            cos, sin = self._lookup_rescaled_cos_sin(
+                q,
+                position_ids,
+                sequence_length=sequence_length,
+            )
         else:
-            cos, sin = self._forward_cos_sin(self.original_embedding, q, position_ids)
+            cos, sin = self._forward_cos_sin(
+                self.original_embedding,
+                q,
+                position_ids,
+                sequence_length=sequence_length,
+            )
         return cos.unsqueeze(1), sin.unsqueeze(1)
 
     def build_mixed_embedding(self, start_token_idx, original_embeddings, device=None):
@@ -213,20 +246,33 @@ class LongRoPE2RotaryPositionEncoding(nn.Module):
             device=device,
         )
 
-    def apply_to_query(self, q, position_ids):
+    def apply_to_query(self, q, position_ids, sequence_length=None):
         """只对 Q 应用 RoPE，供单边注入路径复用。"""
-        cos, sin = self._lookup_cos_sin(q, position_ids)
+        cos, sin = self._lookup_cos_sin(
+            q,
+            position_ids,
+            sequence_length=sequence_length,
+        )
         return (q * cos) + (_rotate_half(q) * sin)
 
-    def apply_to_query_and_key(self, q, k, position_ids):
+    def apply_to_query_and_key(self, q, k, position_ids, sequence_length=None):
         """同时对 Q/K 应用 RoPE，供标准 Attention 路径复用。"""
-        cos, sin = self._lookup_cos_sin(q, position_ids)
+        cos, sin = self._lookup_cos_sin(
+            q,
+            position_ids,
+            sequence_length=sequence_length,
+        )
         q_out = (q * cos) + (_rotate_half(q) * sin)
         k_out = (k * cos) + (_rotate_half(k) * sin)
         return q_out, k_out
 
-    def forward(self, q, k, position_ids):
-        return self.apply_to_query_and_key(q, k, position_ids)
+    def forward(self, q, k, position_ids, sequence_length=None):
+        return self.apply_to_query_and_key(
+            q,
+            k,
+            position_ids,
+            sequence_length=sequence_length,
+        )
 
 
 def build_rotary_position_encoding(config, max_seq_len, *, embedding_mode=None):

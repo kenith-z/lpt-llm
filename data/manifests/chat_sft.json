@@ -1,12 +1,28 @@
 {
   "datasets": [
     {
-      "name": "全量对话数据集名字，对基座模型进行chat训练",
-      "path": "文件路径",
-      "weight": 1.0
-    }, {
-      "name": "data_chat",
-      "path": "../structured/data.chat.jsonl",
+      "name": "who_am_i",
+      "path": "../structured/chat_sft/WhoAmI.jsonl",
+      "weight": 1
+    },
+    {
+      "name": "query-time",
+      "path": "../structured/chat_sft/query-time.jsonl",
+      "weight": 1
+    },
+    {
+      "name": "query-time-nt",
+      "path": "../structured/chat_sft/query-time-nt.jsonl",
+      "weight": 1
+    },
+    {
+      "name": "query-time-supplement",
+      "path": "../structured/chat_sft/query-time-supplement.jsonl",
+      "weight": 1
+    },
+    {
+      "name": "query-time-nt-supplement",
+      "path": "../structured/chat_sft/query-time-nt-supplement.jsonl",
       "weight": 1
     }
   ]

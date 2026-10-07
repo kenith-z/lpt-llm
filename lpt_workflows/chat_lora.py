@@ -6,6 +6,7 @@ from argparse import ArgumentParser
 from pathlib import Path
 
 from lpt_config import ChatLoRATrainingConfig, VALID_LORA_BASE_SOURCES
+from lpt_config.constants import DEFAULT_OPTIMIZER_TYPE, DEFAULT_GRADIENT_CHECKPOINTING
 from lpt_inference import display_model_parameter_summary
 from lpt_lora import (
     LoRAConfig,
@@ -26,8 +27,8 @@ from .common import (
     build_longrope2_options_from_args,
     build_tokenizer_metadata,
     find_existing_model_checkpoint,
+    load_chat_training_dataset,
     load_checkpoint_model,
-    load_dataset_from_manifest,
     load_eval_dataset,
     merge_training_args_with_recipe,
     apply_longrope2_runtime_overrides,
@@ -110,11 +111,18 @@ def finetune_chat_with_lora(
     base_source = base_source or CHAT_LORA_RECIPE.lora_base_source
     apply_longrope2_runtime_overrides(build_longrope2_options_from_args(args))
     tokenizer = build_local_tokenizer()
-    dataset = load_dataset_from_manifest(
-        manifest_path,
-        expected_types={"chat"},
-        seed=args.seed,
+    resume_checkpoint = None if args.no_resume else resolve_chat_lora_resume_checkpoint(base_source)
+    dataset, token_cache_dir = load_chat_training_dataset(
+        manifest_path, tokenizer, args, resume_checkpoint=resume_checkpoint,
     )
+    if getattr(args, "build_cache_only", False):
+        if token_cache_dir is None:
+            raise RuntimeError("--build-cache-only 未能构建 chat token cache。")
+        print("--build-cache-only：chat token cache 已就绪，跳过模型与训练。")
+        return None, tokenizer, None
+    if token_cache_dir is not None and getattr(dataset, "total_count", None) == 0:
+        print("所有 chat LoRA 数据集已完成训练且缓存仍有效，跳过本次训练。")
+        return None, tokenizer, None
     eval_dataset = load_eval_dataset(eval_manifest_path, expected_types={"chat"})
     base_checkpoint = resolve_lora_base_initial_checkpoint(base_source)
     if base_checkpoint is None:
@@ -130,7 +138,6 @@ def finetune_chat_with_lora(
             if module_name.strip()
         ),
     )
-    resume_checkpoint = None if args.no_resume else resolve_chat_lora_resume_checkpoint(base_source)
     if resume_checkpoint is not None:
         adapter_path = resume_checkpoint / "adapter.pt"
         if adapter_path.exists():
@@ -155,13 +162,15 @@ def finetune_chat_with_lora(
             checkpoint_dir=_resolve_chat_lora_checkpoint_root(base_source),
             inference_weight_path=_resolve_chat_lora_adapter_path(base_source),
             save_inference_weights=not args.no_save_inference_weights,
-            batch_size=args.batch_size,
             epochs=args.epochs,
             max_steps=args.max_steps,
             learning_rate=args.learning_rate,
             weight_decay=args.weight_decay,
+            optimizer_type=getattr(args, "optimizer_type", DEFAULT_OPTIMIZER_TYPE),
+            gradient_checkpointing=getattr(args, "gradient_checkpointing", DEFAULT_GRADIENT_CHECKPOINTING),
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             max_grad_norm=args.max_grad_norm,
+            lm_loss_chunk_tokens=args.lm_loss_chunk_tokens,
             warmup_ratio=args.warmup_ratio,
             log_interval=args.log_interval,
             eval_interval=args.eval_interval,
@@ -177,6 +186,16 @@ def finetune_chat_with_lora(
             save_scheduler=not args.no_save_scheduler,
             max_sequence_length=args.train_max_sequence_length,
             sequence_packing=not args.no_sequence_packing,
+            data_num_workers=args.data_num_workers,
+            data_prefetch_factor=args.data_prefetch_factor,
+            data_persistent_workers=args.data_persistent_workers,
+            data_pin_memory=args.data_pin_memory,
+            data_reader_num_workers=args.data_reader_num_workers,
+            data_reader_chunk_bytes=args.data_reader_chunk_bytes,
+            token_cache_dir=token_cache_dir,
+            token_cache_enabled=token_cache_dir is not None,
+            data_length_bucket_window=args.data_length_bucket_window,
+            data_packing_strategy=args.data_packing_strategy,
             thinking_mode=args.thinking_mode,
             thinking_visibility=args.thinking_visibility,
             seed=args.seed,
@@ -203,6 +222,7 @@ def build_parser():
     parser.add_argument("--manifest", type=Path, default=CHAT_LORA_MANIFEST_PATH, help="chat LoRA manifest。")
     parser.add_argument("--base-source", choices=sorted(VALID_LORA_BASE_SOURCES), default=CHAT_LORA_RECIPE.lora_base_source, help="LoRA 基座来源。")
     parser.add_argument("--eval-manifest", type=Path, default=None, help="验证 manifest。")
+    parser.add_argument("--build-cache-only", action="store_true", default=False, help="只构建或校验 chat token cache，跳过模型与训练。")
     parser.add_argument("--lora-rank", type=int, default=CHAT_LORA_RECIPE.lora_rank, help="LoRA rank。")
     parser.add_argument("--lora-alpha", type=float, default=CHAT_LORA_RECIPE.lora_alpha, help="LoRA alpha。")
     parser.add_argument("--lora-dropout", type=float, default=CHAT_LORA_RECIPE.lora_dropout, help="LoRA dropout。")

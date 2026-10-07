@@ -30,9 +30,9 @@ from lpt_config import (
     is_xlstm_memory_enabled_for_layer,
     normalize_model_config,
 )
-from lpt_runtime import resolve_attention_backend
+from lpt_runtime import grouped_swiglu_cpu, grouped_swiglu_cuda, resolve_attention_backend
 
-from .common import RMSNorm, SDPA_SUPPORTS_GQA, SwiGLU, build_position_ids
+from .common import RMSNorm, SDPA_SUPPORTS_GQA, build_position_ids
 from .position_encoding import build_rotary_position_encoding
 from .state_v2 import (
     AttentionLayerState,
@@ -139,6 +139,7 @@ def _build_local_attention_mask(
     *,
     window_size,
     segment_ids=None,
+    allow_mask_elision=True,
 ):
     """构造 sliding-window causal mask，兼容 prefill、decode 与 sequence packing。"""
     key_positions = torch.arange(key_length, device=device)
@@ -169,7 +170,9 @@ def _build_local_attention_mask(
         segment_mask = (query_segment_ids == key_segment_ids) & query_segment_ids.ne(0)
         mask = mask & segment_mask
 
-    if bool(mask.all()):
+    # 推理阶段保留全可见 mask 折叠语义；训练快路径直接交给 SDPA，避免
+    # ``bool(mask.all())`` 为一个仅用于算子选择的判断同步整条 CUDA stream。
+    if allow_mask_elision and bool(mask.all()):
         return None
     return mask
 
@@ -341,6 +344,7 @@ class SharedRetNetAssist(nn.Module):
         request_id=DEFAULT_REQUEST_ID,
         layer_index=0,
         state_slot=None,
+        collect_runtime_state=True,
     ):
         """返回每个 token 的摘要序列和更新后的 request-bound 状态。"""
         projected = self.activation(self.input_proj(x_norm))
@@ -372,7 +376,12 @@ class SharedRetNetAssist(nn.Module):
         ) / total_counts.clamp_min(1.0).unsqueeze(-1)
         summary_sequence = self.state_proj(raw_summary_sequence)
 
-        final_count = int(previous_count + token_mask.sum(dim=1).max().item())
+        if collect_runtime_state:
+            final_count = int(previous_count + token_mask.sum(dim=1).max().item())
+        else:
+            # 正式训练不会消费返回的 request-bound state。使用张量形状生成轻量占位计数，
+            # 避免为日志无关字段把 CUDA token mask 同步回 CPU。
+            final_count = int(previous_count + projected.size(1))
         has_new_tokens = token_mask.sum(dim=1).gt(0)
         final_summary = torch.where(
             has_new_tokens[:, None],
@@ -380,7 +389,7 @@ class SharedRetNetAssist(nn.Module):
             previous_summary,
         )
         summary_norm = None
-        if not torch.is_grad_enabled():
+        if collect_runtime_state and not torch.is_grad_enabled():
             summary_norm = float(final_summary.float().norm(dim=-1).mean().detach().cpu())
         new_state = RetNetAssistState(
             request_id=request_id,
@@ -454,7 +463,14 @@ class QOnlyRetNetAdapter(nn.Module):
         alpha = self.alpha_q.to(dtype=query.dtype)
         return query + alpha * delta
 
-    def apply_to_qk(self, summary_sequence, query, key):
+    def apply_to_qk(
+        self,
+        summary_sequence,
+        query,
+        key,
+        *,
+        collect_runtime_metrics=True,
+    ):
         """同时返回调制后的 Q/K 以及 adapter 观测指标。"""
         q_delta = self._query_delta(summary_sequence, query)
         alpha_q = self.alpha_q.to(dtype=query.dtype)
@@ -465,7 +481,7 @@ class QOnlyRetNetAdapter(nn.Module):
         if k_delta is not None and self.alpha_k is not None:
             alpha_k = self.alpha_k.to(dtype=key.dtype)
             key = key + alpha_k * k_delta
-            if not torch.is_grad_enabled():
+            if collect_runtime_metrics and not torch.is_grad_enabled():
                 alpha_k_value = float(self.alpha_k.detach().cpu())
 
         metrics = {
@@ -474,7 +490,7 @@ class QOnlyRetNetAdapter(nn.Module):
             "alpha_q": None,
             "alpha_k": None,
         }
-        if not torch.is_grad_enabled():
+        if collect_runtime_metrics and not torch.is_grad_enabled():
             metrics = {
                 "q_adapter_delta_norm": float(q_delta.float().norm(dim=-1).mean().detach().cpu()),
                 "k_adapter_delta_norm": 0.0
@@ -511,7 +527,7 @@ class RetNetContextAdapter(nn.Module):
             self.alpha_context.grad.data = self.alpha_context.grad.data.float()
         return self
 
-    def forward(self, summary_sequence, hidden):
+    def forward(self, summary_sequence, hidden, *, collect_runtime_metrics=True):
         """在 Attention 输出投影后注入轻量上下文残差。"""
         delta = self.up_projection(self.down_projection(summary_sequence))
         alpha = self.alpha_context.to(dtype=hidden.dtype)
@@ -520,7 +536,7 @@ class RetNetContextAdapter(nn.Module):
             "context_adapter_delta_norm": None,
             "alpha_context": None,
         }
-        if not torch.is_grad_enabled():
+        if collect_runtime_metrics and not torch.is_grad_enabled():
             metrics = {
                 "context_adapter_delta_norm": float(delta.float().norm(dim=-1).mean().detach().cpu()),
                 "alpha_context": float(self.alpha_context.detach().cpu()),
@@ -585,11 +601,13 @@ class LocalAttentionMixerV2(nn.Module):
         x_norm,
         position_ids,
         rope_cache,
+        rope_sequence_length=None,
         attention_mask=None,
         segment_ids=None,
         layer_state=None,
         request_id=DEFAULT_REQUEST_ID,
         use_kv_cache=True,
+        collect_runtime_state=True,
     ):
         """执行单层局部注意力，并返回新的 Attention/RetNet 状态。"""
         layer_state = _as_layer_state_v2(layer_state)
@@ -612,16 +630,27 @@ class LocalAttentionMixerV2(nn.Module):
                 request_id=request_id,
                 layer_index=self.layer_index,
                 state_slot=self.retnet_state_slot,
+                collect_runtime_state=collect_runtime_state,
             )
             # adapter metrics 会写入 RetNetAssistState，资源/实验报告可直接观察
             # delta_norm 与 alpha，便于区分机制是否真正参与前向。
-            q, k, adapter_metrics = self.q_adapter.apply_to_qk(summary_sequence, q, k)
+            q, k, adapter_metrics = self.q_adapter.apply_to_qk(
+                summary_sequence,
+                q,
+                k,
+                collect_runtime_metrics=collect_runtime_state,
+            )
             retnet_state = replace(retnet_state, **adapter_metrics)
         else:
             # 禁用 RetNetAssist 的层必须清空传入状态，避免 state pool 绑定时把共享 slot 的状态串到未启用层。
             retnet_state = None
 
-        q, k = rope_cache(q, k, position_ids)
+        q, k = rope_cache(
+            q,
+            k,
+            position_ids,
+            sequence_length=rope_sequence_length,
+        )
         use_kv_cache = bool(use_kv_cache)
         past_k, past_v = self._read_past_kv(layer_state.attention) if use_kv_cache else (None, None)
 
@@ -664,6 +693,7 @@ class LocalAttentionMixerV2(nn.Module):
             x_norm.device,
             window_size=self.config.attention_window_size,
             segment_ids=segment_ids,
+            allow_mask_elision=collect_runtime_state,
         )
         sdpa_kwargs = {
             "attn_mask": sdpa_mask,
@@ -684,7 +714,11 @@ class LocalAttentionMixerV2(nn.Module):
         if self._retnet_enabled_for_layer() and bool(self.config.retnet_context_adapter_enabled):
             if self.context_adapter is None or summary_sequence is None:
                 raise RuntimeError("启用 RetNetContextAdapter 的层缺少 context_adapter 或 summary_sequence。")
-            attention_output, context_metrics = self.context_adapter(summary_sequence, attention_output)
+            attention_output, context_metrics = self.context_adapter(
+                summary_sequence,
+                attention_output,
+                collect_runtime_metrics=collect_runtime_state,
+            )
             retnet_state = replace(retnet_state, **context_metrics)
 
         new_state = replace(
@@ -696,7 +730,13 @@ class LocalAttentionMixerV2(nn.Module):
 
 
 class SwiGLUMoE(nn.Module):
-    """同质 SwiGLU-MoE FFN。"""
+    """使用打包权重和 grouped GEMM 的同质 SwiGLU-MoE FFN。
+
+    专家权重沿用 ``nn.Linear`` 的参数方向，直接注册为三块大张量：
+    ``expert_w1/expert_w3=[E,I,H]``、``expert_w2=[E,H,I]``。这样路由后
+    可以按 expert 连续排列 token，并把同一投影的全部专家交给一次
+    ``F.grouped_mm``；CPU 则使用 ``lpt_runtime.grouped_moe`` 的参考后端。
+    """
 
     def __init__(self, config, layer_index):
         super().__init__()
@@ -705,10 +745,68 @@ class SwiGLUMoE(nn.Module):
         self.num_experts = int(config.moe_num_experts)
         self.top_k = int(config.moe_top_k)
         self.router = nn.Linear(self.hidden_size, self.num_experts, bias=False)
-        self.experts = nn.ModuleList([SwiGLU(self.hidden_size) for _ in range(self.num_experts)])
+        self.intermediate_size = ((int(8 * self.hidden_size / 3) + 255) // 256) * 256
+        self.expert_w1 = nn.Parameter(
+            torch.empty(self.num_experts, self.intermediate_size, self.hidden_size)
+        )
+        self.expert_w2 = nn.Parameter(
+            torch.empty(self.num_experts, self.hidden_size, self.intermediate_size)
+        )
+        self.expert_w3 = nn.Parameter(
+            torch.empty(self.num_experts, self.intermediate_size, self.hidden_size)
+        )
+        self._reset_expert_parameters()
 
-    def forward(self, x_ffn, request_id=DEFAULT_REQUEST_ID):
-        """按 router top-k 稀疏执行 SwiGLU experts。"""
+    def _reset_expert_parameters(self):
+        """按对应 ``nn.Linear`` 的 fan-in 界限初始化三块专家权重。"""
+        first_bound = self.hidden_size**-0.5
+        second_bound = self.intermediate_size**-0.5
+        nn.init.uniform_(self.expert_w1, -first_bound, first_bound)
+        nn.init.uniform_(self.expert_w3, -first_bound, first_bound)
+        nn.init.uniform_(self.expert_w2, -second_bound, second_bound)
+
+    def _build_grouped_routes(self, flat_x, flat_indices):
+        """把 ``token×top_k`` 路由整理为按 expert 连续排列的批次。
+
+        返回值中的 ``assignment_order`` 用于同步重排路由权重；输出只要求
+        数学上等价，不再承诺旧实现的浮点累加顺序。``offsets`` 使用每个
+        expert 的累计结束位置，正是 CUDA grouped GEMM 所需的布局；空
+        expert 通过重复 offset 表示，不需要逐 expert 查找 token。
+        """
+        flat_expert_ids = flat_indices.reshape(-1)
+        assignment_order = torch.argsort(flat_expert_ids, stable=True)
+        sorted_expert_ids = flat_expert_ids[assignment_order]
+        token_positions = torch.arange(
+            flat_x.size(0),
+            device=flat_x.device,
+            dtype=torch.long,
+        ).repeat_interleave(self.top_k)
+        sorted_token_positions = token_positions[assignment_order]
+        sorted_x = flat_x[sorted_token_positions]
+        counts = torch.bincount(sorted_expert_ids, minlength=self.num_experts)
+        offsets = counts.cumsum(dim=0, dtype=torch.int32)
+        return (
+            sorted_x,
+            sorted_token_positions,
+            assignment_order,
+            offsets,
+        )
+
+    def forward(
+        self,
+        x_ffn,
+        request_id=DEFAULT_REQUEST_ID,
+        *,
+        collect_runtime_metrics=True,
+    ):
+        """按 router top-k 稀疏执行 SwiGLU experts。
+
+        路由 token 先按 expert 分组，再通过 grouped GEMM 一次处理每个
+        expert 的全部 token。CUDA 路径消除了原先按 route×expert 的
+        ``nonzero``/Python 循环；CPU 后端仅作为独立 smoke 参考实现。
+        参数布局固定为 v2 新 schema，
+        旧 checkpoint 需要通过离线转换器迁移后再加载。
+        """
         router_logits = self.router(x_ffn).float()
         topk_logits, topk_indices = torch.topk(router_logits, k=self.top_k, dim=-1)
         topk_weights = F.softmax(topk_logits, dim=-1).to(dtype=x_ffn.dtype)
@@ -716,42 +814,63 @@ class SwiGLUMoE(nn.Module):
         flat_x = x_ffn.reshape(-1, self.hidden_size)
         flat_indices = topk_indices.reshape(-1, self.top_k)
         flat_weights = topk_weights.reshape(-1, self.top_k)
-        flat_output = torch.zeros_like(flat_x)
-        for route_rank in range(self.top_k):
-            route_indices = flat_indices[:, route_rank]
-            route_weights = flat_weights[:, route_rank].unsqueeze(-1)
-            for expert_index, expert in enumerate(self.experts):
-                selected_positions = torch.nonzero(
-                    route_indices.eq(expert_index),
-                    as_tuple=False,
-                ).flatten()
-                if selected_positions.numel() == 0:
-                    continue
-                # 只对当前 token 命中的 expert 建图，未命中的 expert 不参与本 batch 的前向/反向。
-                selected_x = flat_x.index_select(0, selected_positions)
-                routed_output = expert(selected_x)
-                routed_output = routed_output * route_weights.index_select(0, selected_positions)
-                flat_output = flat_output.index_add(0, selected_positions, routed_output)
+        (
+            sorted_x,
+            sorted_token_positions,
+            assignment_order,
+            offsets,
+        ) = self._build_grouped_routes(flat_x, flat_indices)
+
+        if sorted_x.numel() == 0:
+            sorted_output = sorted_x.new_empty((0, self.hidden_size))
+        elif sorted_x.is_cuda:
+            sorted_output = grouped_swiglu_cuda(
+                sorted_x,
+                self.expert_w1,
+                self.expert_w2,
+                self.expert_w3,
+                offsets,
+            )
+        else:
+            sorted_output = grouped_swiglu_cpu(
+                sorted_x,
+                self.expert_w1,
+                self.expert_w2,
+                self.expert_w3,
+                offsets,
+            )
+
+        if sorted_output.dtype != flat_x.dtype:
+            sorted_output = sorted_output.to(dtype=flat_x.dtype)
+        sorted_weights = flat_weights.reshape(-1)[assignment_order]
+        routed_output = sorted_output * sorted_weights.unsqueeze(-1)
+        flat_output = torch.zeros_like(flat_x).scatter_add(
+            0,
+            sorted_token_positions.unsqueeze(-1).expand(-1, self.hidden_size),
+            routed_output,
+        )
         moe_output = flat_output.view_as(x_ffn)
 
-        expert_counts = torch.bincount(
-            topk_indices.reshape(-1),
-            minlength=self.num_experts,
-        )
-        router_probs = F.softmax(router_logits, dim=-1)
-        # MoE 状态只保存观测指标，不保存专家中间激活，避免 checkpoint 膨胀。
-        router_entropy = -(router_probs * router_probs.clamp_min(1e-12).log()).sum(dim=-1).mean()
-        load_fraction = expert_counts.to(dtype=router_logits.dtype) / max(1, topk_indices.numel())
-        load_balance_loss = (load_fraction * load_fraction).sum() * self.num_experts
-        router_z_loss = torch.logsumexp(router_logits, dim=-1).pow(2).mean()
-        moe_state = MoELayerState(
-            request_id=request_id,
-            layer_index=self.layer_index,
-            expert_token_counts=tuple(int(value) for value in expert_counts.detach().cpu().tolist()),
-            router_entropy=float(router_entropy.detach().cpu()),
-            load_balance_loss=float(load_balance_loss.detach().cpu()),
-            router_z_loss=float(router_z_loss.detach().cpu()),
-        )
+        moe_state = None
+        if collect_runtime_metrics:
+            expert_counts = torch.bincount(
+                topk_indices.reshape(-1),
+                minlength=self.num_experts,
+            )
+            router_probs = F.softmax(router_logits, dim=-1)
+            # MoE 状态只保存观测指标，不保存专家中间激活，避免 checkpoint 膨胀。
+            router_entropy = -(router_probs * router_probs.clamp_min(1e-12).log()).sum(dim=-1).mean()
+            load_fraction = expert_counts.to(dtype=router_logits.dtype) / max(1, topk_indices.numel())
+            load_balance_loss = (load_fraction * load_fraction).sum() * self.num_experts
+            router_z_loss = torch.logsumexp(router_logits, dim=-1).pow(2).mean()
+            moe_state = MoELayerState(
+                request_id=request_id,
+                layer_index=self.layer_index,
+                expert_token_counts=tuple(int(value) for value in expert_counts.detach().cpu().tolist()),
+                router_entropy=float(router_entropy.detach().cpu()),
+                load_balance_loss=float(load_balance_loss.detach().cpu()),
+                router_z_loss=float(router_z_loss.detach().cpu()),
+            )
         return moe_output, moe_state
 
 
@@ -868,6 +987,7 @@ class xLSTMMemoryAssist(nn.Module):
         boundary_metadata=None,
         session_event=None,
         request_id=DEFAULT_REQUEST_ID,
+        collect_runtime_state=True,
     ):
         """更新 FFN 侧外挂记忆，并生成 memory-augmented FFN 输入。"""
         if not self._enabled_for_layer():
@@ -882,11 +1002,13 @@ class xLSTMMemoryAssist(nn.Module):
         else:
             token_mask = attention_mask[:, -h_ffn.size(1):].to(device=h_ffn.device, dtype=h_ffn.dtype)
 
-        reset_reason = self._resolve_reset_reason(
-            boundary_metadata=boundary_metadata,
-            input_ids=input_ids,
-            session_event=session_event,
-        )
+        reset_reason = None
+        if collect_runtime_state:
+            reset_reason = self._resolve_reset_reason(
+                boundary_metadata=boundary_metadata,
+                input_ids=input_ids,
+                session_event=session_event,
+            )
         previous_count = 0 if previous_state is None else int(previous_state.token_count)
         previous_decay_count = 0 if previous_state is None else int(previous_state.decay_count)
         previous_reset_count = 0 if previous_state is None else int(previous_state.reset_count)
@@ -930,7 +1052,10 @@ class xLSTMMemoryAssist(nn.Module):
             # ffn_norm_only_eval 用于消融：状态继续更新，但 Router/experts 不读取 adapter 输出。
             x_ffn = h_ffn
 
-        active_token_count = int(token_mask.sum(dim=1).max().item())
+        if collect_runtime_state:
+            active_token_count = int(token_mask.sum(dim=1).max().item())
+        else:
+            active_token_count = int(h_ffn.size(1))
         final_token_count = previous_count + active_token_count
         final_memory = raw_memory_sequence[:, -1]
         final_memory, last_decay_token_count, new_decay_count = self._apply_decay(
@@ -945,8 +1070,13 @@ class xLSTMMemoryAssist(nn.Module):
             fallback_memory = torch.zeros_like(final_memory)
         final_memory = torch.where(has_new_tokens[:, None], final_memory, fallback_memory)
 
-        memory_norm = float(final_memory.float().norm(dim=-1).mean().detach().cpu())
-        adapter_delta_norm = float(adapter_delta.float().norm(dim=-1).mean().detach().cpu())
+        memory_norm = None
+        adapter_delta_norm = None
+        effective_beta_value = None
+        if collect_runtime_state:
+            memory_norm = float(final_memory.float().norm(dim=-1).mean().detach().cpu())
+            adapter_delta_norm = float(adapter_delta.float().norm(dim=-1).mean().detach().cpu())
+            effective_beta_value = float(effective_beta_fp32.detach().cpu())
         previous_count = 0 if previous_state is None else int(previous_state.token_count)
         new_state = xLSTMMemoryState(
             request_id=request_id,
@@ -957,7 +1087,7 @@ class xLSTMMemoryAssist(nn.Module):
             decay_count=previous_decay_count + new_decay_count,
             reset_count=reset_count,
             last_reset_reason=last_reset_reason,
-            effective_beta=float(effective_beta_fp32.detach().cpu()),
+            effective_beta=effective_beta_value,
             memory_norm=memory_norm,
             adapter_delta_norm=adapter_delta_norm,
         )
@@ -999,6 +1129,7 @@ class LPTBlockV2(nn.Module):
         x,
         position_ids,
         rope_cache,
+        rope_sequence_length=None,
         input_ids=None,
         attention_mask=None,
         segment_ids=None,
@@ -1007,6 +1138,7 @@ class LPTBlockV2(nn.Module):
         layer_state=None,
         request_id=DEFAULT_REQUEST_ID,
         use_kv_cache=True,
+        collect_runtime_state=True,
     ):
         """执行一个 LPT v2 block：Attention-First，再进入记忆增强 MoE FFN。"""
         layer_state = _as_layer_state_v2(layer_state)
@@ -1014,11 +1146,13 @@ class LPTBlockV2(nn.Module):
             self.sequence_norm(x),
             position_ids=position_ids,
             rope_cache=rope_cache,
+            rope_sequence_length=rope_sequence_length,
             attention_mask=attention_mask,
             segment_ids=segment_ids,
             layer_state=layer_state,
             request_id=request_id,
             use_kv_cache=use_kv_cache,
+            collect_runtime_state=collect_runtime_state,
         )
         x = x + attn_out
         h_ffn = self.ffn_norm(x)
@@ -1031,8 +1165,13 @@ class LPTBlockV2(nn.Module):
             boundary_metadata=memory_boundary_metadata,
             session_event=session_event,
             request_id=request_id,
+            collect_runtime_state=collect_runtime_state,
         )
-        ffn_out, moe_state = self.feed_forward(x_ffn, request_id=request_id)
+        ffn_out, moe_state = self.feed_forward(
+            x_ffn,
+            request_id=request_id,
+            collect_runtime_metrics=collect_runtime_state,
+        )
         x = x + ffn_out
         layer_state = replace(layer_state, moe=moe_state, xlstm_memory=xlstm_state)
         return x, layer_state
@@ -1047,6 +1186,8 @@ class LPTV2(nn.Module):
         if self.config.architecture_version != LPT_V2_ARCHITECTURE_VERSION:
             raise ValueError("LPTV2 只接受 architecture_version='lpt_v2' 的 ModelConfig。")
         self.vocabulary_size = int(vocabulary_size)
+        # 梯度检查点开关，由训练循环控制；默认关闭，推理永远不启用。
+        self.gradient_checkpointing = False
         self.token_embedding = nn.Embedding(self.vocabulary_size, self.config.hidden_size)
         self.thinking_mode_embedding = nn.Embedding(
             int(self.config.thinking_mode_count),
@@ -1200,14 +1341,22 @@ class LPTV2(nn.Module):
             states_by_slot[state_slot] = layer_state.retnet_assist
         return states_by_slot
 
-    def _normalize_control_ids(self, ids, *, reference, embedding, name):
+    def _normalize_control_ids(
+        self,
+        ids,
+        *,
+        reference,
+        embedding,
+        name,
+        validate_range=True,
+    ):
         """把 thinking 控制 id 规范化到输入同形状，并做范围检查。"""
         if ids is None:
             return torch.zeros_like(reference, dtype=torch.long)
         normalized = ids.to(device=reference.device, dtype=torch.long)
         if normalized.shape != reference.shape:
             raise ValueError(f"{name} 形状必须与 input_ids 一致。")
-        if normalized.numel() and (
+        if validate_range and normalized.numel() and (
             int(normalized.min().item()) < 0
             or int(normalized.max().item()) >= int(embedding.num_embeddings)
         ):
@@ -1228,6 +1377,9 @@ class LPTV2(nn.Module):
         rope_cache_scope="inference",
         request_id=DEFAULT_REQUEST_ID,
         use_kv_cache=True,
+        collect_runtime_state=None,
+        rope_sequence_length=None,
+        validate_control_ids=True,
     ):
         """执行模型前向，返回 logits 与每层新的 LayerStateV2。"""
         embedding_device = self.token_embedding.weight.device
@@ -1240,6 +1392,13 @@ class LPTV2(nn.Module):
             position_ids = build_position_ids(attention_mask)[:, -input_ids.size(1):]
         else:
             position_ids = position_ids.to(device=embedding_device, dtype=torch.long)
+        if rope_sequence_length is None:
+            # 默认模型 API 保持自校验；训练流水线可传入 CPU 侧预计算值，避免 CUDA 回读。
+            rope_sequence_length = int(position_ids.max().item()) + 1
+        else:
+            rope_sequence_length = int(rope_sequence_length)
+            if rope_sequence_length <= 0:
+                raise ValueError("rope_sequence_length 必须为正整数。")
         if segment_ids is not None:
             segment_ids = segment_ids.to(device=embedding_device, dtype=torch.long)
         thinking_mode_ids = self._normalize_control_ids(
@@ -1247,12 +1406,14 @@ class LPTV2(nn.Module):
             reference=input_ids,
             embedding=self.thinking_mode_embedding,
             name="thinking_mode_ids",
+            validate_range=bool(validate_control_ids),
         )
         target_channel_ids = self._normalize_control_ids(
             target_channel_ids,
             reference=input_ids,
             embedding=self.thinking_channel_embedding,
             name="target_channel_ids",
+            validate_range=bool(validate_control_ids),
         )
 
         rope_cache = self.get_rope_cache(rope_cache_scope)
@@ -1260,9 +1421,31 @@ class LPTV2(nn.Module):
             self.token_embedding(input_ids)
             + self.thinking_mode_embedding(thinking_mode_ids)
         )
+        # 训练 workflow 不传历史状态且明确关闭 KV cache；这条路径的返回状态只会被丢弃，
+        # 因此不需要为运行态观测指标同步 CUDA。显式传入历史状态时仍保持完整状态语义。
+        if collect_runtime_state is None:
+            collect_runtime_state = not (
+                self.training
+                and not bool(use_kv_cache)
+                and layer_states is None
+                and memory_boundary_metadata is None
+                and session_event is None
+            )
+        else:
+            collect_runtime_state = bool(collect_runtime_state)
+        if not collect_runtime_state and (
+            bool(use_kv_cache)
+            or layer_states is not None
+            or memory_boundary_metadata is not None
+            or session_event is not None
+        ):
+            raise ValueError(
+                "collect_runtime_state=False 仅适用于无历史状态、无 KV cache 的 loss 前向。"
+            )
         previous_states = self._normalize_incoming_layer_states(layer_states)
         previous_retnet_states = self._collect_retnet_previous_states(previous_states)
         new_states = []
+
         for layer_index, (layer, layer_state) in enumerate(zip(self.layers, previous_states)):
             layer_state = _as_layer_state_v2(layer_state)
             if _retnet_enabled_for_layer(self.config, layer_index):
@@ -1284,19 +1467,45 @@ class LPTV2(nn.Module):
             layer_segment_ids = _move_optional_tensor(segment_ids, layer_device, dtype=torch.long)
             if rope_cache.original_embedding.rescale_factors.device != layer_device:
                 rope_cache.to(device=layer_device, dtype=hidden_states.dtype)
-            hidden_states, new_layer_state = layer(
-                hidden_states,
-                input_ids=layer_input_ids,
-                position_ids=layer_position_ids,
-                rope_cache=rope_cache,
-                attention_mask=layer_attention_mask,
-                segment_ids=layer_segment_ids,
-                memory_boundary_metadata=memory_boundary_metadata,
-                session_event=session_event,
-                layer_state=layer_state,
-                request_id=request_id,
-                use_kv_cache=use_kv_cache,
-            )
+
+            # 如果启用梯度检查点且处于训练模式，使用 checkpoint 包装层前向
+            if self.gradient_checkpointing and self.training:
+                # 梯度检查点：不保存中间激活值，反向时重新计算，节省显存但增加计算时间
+                # 使用关键字参数来传递，避免非 Tensor 对象（如 rope_cache）被序列化问题
+                hidden_states, new_layer_state = torch.utils.checkpoint.checkpoint(
+                    layer,
+                    hidden_states,
+                    use_reentrant=False,
+                    input_ids=layer_input_ids,
+                    position_ids=layer_position_ids,
+                    rope_cache=rope_cache,
+                    rope_sequence_length=rope_sequence_length,
+                    attention_mask=layer_attention_mask,
+                    segment_ids=layer_segment_ids,
+                    memory_boundary_metadata=memory_boundary_metadata,
+                    session_event=session_event,
+                    layer_state=layer_state,
+                    request_id=request_id,
+                    use_kv_cache=use_kv_cache,
+                    collect_runtime_state=collect_runtime_state,
+                )
+            else:
+                # 正常前向传播
+                hidden_states, new_layer_state = layer(
+                    hidden_states,
+                    input_ids=layer_input_ids,
+                    position_ids=layer_position_ids,
+                    rope_cache=rope_cache,
+                    rope_sequence_length=rope_sequence_length,
+                    attention_mask=layer_attention_mask,
+                    segment_ids=layer_segment_ids,
+                    memory_boundary_metadata=memory_boundary_metadata,
+                    session_event=session_event,
+                    layer_state=layer_state,
+                    request_id=request_id,
+                    use_kv_cache=use_kv_cache,
+                    collect_runtime_state=collect_runtime_state,
+                )
             new_states.append(new_layer_state)
 
         final_norm_device = next(self.final_norm.parameters()).device

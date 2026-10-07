@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import json
 import queue
 import sys
@@ -25,6 +26,11 @@ from lpt_protocol import (
 )
 
 from .session import InferenceSession
+
+
+BEIJING_TIMEZONE = timezone(timedelta(hours=8))
+SYSTEM_TIME_PREFIX = "当前时间为："
+CHINESE_WEEKDAYS = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
 
 
 @dataclass(frozen=True)
@@ -98,13 +104,47 @@ def build_default_generation_config(**overrides):
     return GenerationConfig(**payload)
 
 
-def _normalize_conversation(conversation):
-    """把单轮字符串或多轮 messages 统一成 messages 列表。"""
+def _format_default_system_content(now=None):
+    """生成与 chat SFT 数据一致的当前北京时间 system 内容。"""
+    timestamp = datetime.now(BEIJING_TIMEZONE) if now is None else now
+    if timestamp.tzinfo is None or timestamp.utcoffset() != timedelta(hours=8):
+        raise ValueError("推理 system 时间必须是带 +08:00 时区的时间。")
+    return (
+        f"{SYSTEM_TIME_PREFIX}{timestamp.isoformat(timespec='seconds')}，"
+        f"{CHINESE_WEEKDAYS[timestamp.weekday()]}。"
+    )
+
+
+def _normalize_conversation(conversation, *, add_default_system=True, now=None):
+    """把 conversation 统一成 messages，并补充当前北京时间 system。"""
     if isinstance(conversation, str):
-        return [{"role": "user", "content": conversation}]
-    if isinstance(conversation, list):
-        return conversation
-    raise TypeError("conversation 必须是字符串或 messages 列表。")
+        messages = [{"role": "user", "content": conversation}]
+    elif isinstance(conversation, list):
+        # 复制消息容器，避免为推理补 system 时修改调用方的多轮历史。
+        messages = [
+            dict(message) if isinstance(message, dict) else message
+            for message in conversation
+        ]
+    else:
+        raise TypeError("conversation 必须是字符串或 messages 列表。")
+
+    if not add_default_system:
+        return messages
+
+    system_content = _format_default_system_content(now)
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "system":
+            continue
+        # 离线 SFT 数据已经有默认时间 system；推理时刷新它，避免重复插入。
+        if str(message.get("content", "")).startswith(SYSTEM_TIME_PREFIX):
+            updated = dict(message)
+            updated["content"] = system_content
+            messages[index] = updated
+            return messages
+        # 用户自定义 system 需要保留，同时把当前时间放在最前面供模型读取。
+        return [{"role": "system", "content": system_content}, *messages]
+
+    return [{"role": "system", "content": system_content}, *messages]
 
 
 def _normalize_output_format(output_format):
@@ -665,12 +705,18 @@ def _generate_single_response(
     request_id="chat-1",
     tools=None,
     event_sink=None,
+    add_default_system=True,
+    now=None,
 ):
     """生成单条回复；event_sink 非空时同步推送流式事件。"""
     resolved_generation_config = generation_config or build_default_generation_config()
     eos_token_id = tokenizer.eos_token_id
     pad_token_id = tokenizer.pad_token_id
-    messages = _normalize_conversation(conversation)
+    messages = _normalize_conversation(
+        conversation,
+        add_default_system=add_default_system,
+        now=now,
+    )
     tool_choice = _normalize_tool_choice(getattr(resolved_generation_config, "tool_choice", "none"))
     prompt_messages = _messages_with_tool_context(messages, tools=tools, tool_choice=tool_choice)
     actual_output_format = _resolve_effective_output_format(
@@ -819,6 +865,7 @@ def generate_responses_with_token_counts(
     generation_config=None,
     request_id_prefix="chat",
     tools=None,
+    add_default_system=True,
 ):
     """对一组 conversation 生成回复并返回 token 统计。"""
     resolved_generation_config = generation_config or build_default_generation_config()
@@ -838,6 +885,7 @@ def generate_responses_with_token_counts(
             generation_config=resolved_generation_config,
             request_id=f"{request_id_prefix}-{index}",
             tools=tools,
+            add_default_system=add_default_system,
         )
         results.append(result)
     if was_training:
@@ -854,6 +902,7 @@ def stream_generate_response_events(
     generation_config=None,
     request_id="chat-stream",
     tools=None,
+    add_default_system=True,
 ):
     """流式生成单条回复，产出 thinking/answer/done 事件。"""
     resolved_generation_config = generation_config or build_default_generation_config()
@@ -871,6 +920,7 @@ def stream_generate_response_events(
                 generation_config=resolved_generation_config,
                 request_id=request_id,
                 tools=tools,
+                add_default_system=add_default_system,
                 event_sink=event_queue.put,
             )
         except BaseException as error:  # pragma: no cover - 由消费端重新抛出
@@ -919,7 +969,16 @@ def _print_generation_result(result):
     )
 
 
-def run_chat_session(model, tokenizer, *, generation_config=None, multi_turn=True, stream=False, tools=None):
+def run_chat_session(
+    model,
+    tokenizer,
+    *,
+    generation_config=None,
+    multi_turn=True,
+    stream=False,
+    tools=None,
+    add_default_system=True,
+):
     """运行交互式 chat 会话。"""
     messages = []
     print("进入 LPT v2 chat；输入 exit/quit 结束。")
@@ -941,6 +1000,7 @@ def run_chat_session(model, tokenizer, *, generation_config=None, multi_turn=Tru
                 messages,
                 generation_config=generation_config,
                 tools=tools,
+                add_default_system=add_default_system,
             ):
                 if event.event_type == "done":
                     result = event.result
@@ -963,6 +1023,7 @@ def run_chat_session(model, tokenizer, *, generation_config=None, multi_turn=Tru
                 [messages],
                 generation_config=generation_config,
                 tools=tools,
+                add_default_system=add_default_system,
             )[0]
             _print_generation_result(result)
         if result.tool_calls:

@@ -1,6 +1,6 @@
 """LPT v2 模型本体包。"""
 
-from .common import RMSNorm, SDPA_SUPPORTS_GQA, SwiGLU, build_position_ids
+from .common import RMSNorm, SDPA_SUPPORTS_GQA, build_position_ids
 from .checkpoint_v2 import (
     LPT_V2_CHECKPOINT_FORMAT,
     LPT_V2_CHECKPOINT_SCHEMA_VERSION,

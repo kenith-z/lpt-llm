@@ -1,5 +1,4 @@
 """LPT v2 项目级运行配置。"""
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -8,18 +7,28 @@ import torch
 from .constants import (
     ARTIFACT_ROOT_DIR,
     CHAT_LORA_ARTIFACT_DIR,
-    CHAT_LORA_BATCH_SIZE,
+    CHAT_LORA_TOKEN_CACHE_ENABLED,
     CHAT_LORA_EPOCHS,
     CHAT_LORA_LEARNING_RATE,
     CHAT_LORA_MANIFEST_PATH,
     CHAT_LORA_WARMUP_RATIO,
     CHAT_SFT_ARTIFACT_DIR,
-    CHAT_SFT_BATCH_SIZE,
+    CHAT_SFT_TOKEN_CACHE_ENABLED,
     CHAT_SFT_EPOCHS,
     CHAT_SFT_LEARNING_RATE,
     CHAT_SFT_MANIFEST_PATH,
     CHAT_SFT_WARMUP_RATIO,
     CHAT_TEMPLATE_VERSION,
+    DEFAULT_DATA_NUM_WORKERS,
+    DEFAULT_DATA_READER_CHUNK_BYTES,
+    DEFAULT_DATA_READER_NUM_WORKERS,
+    DEFAULT_DATA_LENGTH_BUCKET_WINDOW,
+    DEFAULT_DATA_PACKING_STRATEGY,
+    DEFAULT_DATA_PERSISTENT_WORKERS,
+    DEFAULT_DATA_PIN_MEMORY,
+    DEFAULT_DATA_PREFETCH_FACTOR,
+    DEFAULT_TOKEN_CACHE_DIR,
+    DEFAULT_TOKEN_CACHE_ENABLED,
     DEFAULT_DETERMINISTIC_ALGORITHMS,
     DEFAULT_DEVICE,
     DEFAULT_DTYPE,
@@ -37,6 +46,7 @@ from .constants import (
     DEFAULT_GENERATION_TOP_K,
     DEFAULT_GENERATION_TOP_P,
     DEFAULT_GRADIENT_ACCUMULATION_STEPS,
+    DEFAULT_GRADIENT_CHECKPOINTING,
     DEFAULT_INFERENCE_MAX_NEW_TOKENS,
     DEFAULT_INFERENCE_PROMPT_IDS,
     DEFAULT_LATEST_SAVE_INTERVAL_STEPS,
@@ -47,9 +57,11 @@ from .constants import (
     DEFAULT_LORA_DROPOUT,
     DEFAULT_LORA_RANK,
     DEFAULT_LORA_TARGET_MODULES,
+    DEFAULT_LM_LOSS_CHUNK_TOKENS,
     DEFAULT_MAX_GRAD_NORM,
     DEFAULT_MEMORY_EVAL_SEQUENCE_LENGTH,
     DEFAULT_MODEL_SIZE_PRESET,
+    DEFAULT_OPTIMIZER_TYPE,
     DEFAULT_PROFILE,
     DEFAULT_RESOURCE_DECODE_STEPS,
     DEFAULT_BEST_CHECKPOINT_METRIC,
@@ -60,7 +72,6 @@ from .constants import (
     DEFAULT_SAVE_SCHEDULER,
     DEFAULT_SEQUENCE_PACKING_ENABLED,
     DEFAULT_TENSORBOARD_ENABLED,
-    DEFAULT_TRAINING_BATCH_SIZE,
     DEFAULT_TRAINING_EPOCHS,
     DEFAULT_TRAINING_LEARNING_RATE,
     DEFAULT_TRAINING_MAX_STEPS,
@@ -72,10 +83,10 @@ from .constants import (
     MODEL_NAME_EN,
     MODEL_NAME_ZH,
     TEXT_PRETRAIN_ARTIFACT_DIR,
-    TEXT_PRETRAIN_BATCH_SIZE,
     TEXT_PRETRAIN_EPOCHS,
     TEXT_PRETRAIN_LEARNING_RATE,
     TEXT_PRETRAIN_MANIFEST_PATH,
+    TEXT_PRETRAIN_TOKEN_CACHE_ENABLED,
     TEXT_PRETRAIN_WARMUP_RATIO,
 )
 
@@ -112,8 +123,7 @@ class GlobalConfig:
     pad_to_multiple_of = 8
     # 流式数据集 shuffle 缓冲区大小，控制随机性与内存占用的折中。
     dataset_shuffle_buffer_size = 2048
-    # 本地默认可见 GPU；运行脚本仍可通过环境变量或 CLI 做外部覆盖。
-    os.environ["CUDA_VISIBLE_DEVICES"] = '0,1'
+    # CUDA 可见设备由启动进程的环境变量决定，导入配置模块时不得覆盖外部选择。
     # 当前进程默认 torch device，由 CUDA 可用性自动决定。
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -169,8 +179,6 @@ class BaseTrainingRecipeConfig:
     manifest_path: Path | None = None
     # 训练产物根目录；具体阶段会覆盖到自己的子目录。
     artifact_dir: Path | None = ARTIFACT_ROOT_DIR
-    # 每个训练 batch 的样本数。
-    batch_size: int = DEFAULT_TRAINING_BATCH_SIZE
     # 目标总 epoch 数；训练循环会结合 max_steps 得到实际 batch 预算。
     target_total_epochs: int = DEFAULT_TRAINING_EPOCHS
     # 最大训练 batch 数；None 表示不按 step 额外截断。
@@ -179,10 +187,16 @@ class BaseTrainingRecipeConfig:
     learning_rate: float = DEFAULT_TRAINING_LEARNING_RATE
     # AdamW weight decay，norm/bias 等参数会在 optimizer 构造时排除。
     weight_decay: float = DEFAULT_WEIGHT_DECAY
+    # 优化器类型：adamw 或 adamw8bit（8bit 量化优化器状态，需要 bitsandbytes）。
+    optimizer_type: str = DEFAULT_OPTIMIZER_TYPE
+    # 是否启用梯度检查点以节省激活值显存；启用后训练速度降低 10-20%。
+    gradient_checkpointing: bool = DEFAULT_GRADIENT_CHECKPOINTING
     # 梯度累积步数，用于小显存下扩大等效 batch。
     gradient_accumulation_steps: int = DEFAULT_GRADIENT_ACCUMULATION_STEPS
     # 梯度裁剪阈值；0/None 通常表示不裁剪。
     max_grad_norm: float = DEFAULT_MAX_GRAD_NORM
+    # LM loss 分块 token 数；256 为显存安全默认，显存充足时可调大减少 kernel 数。
+    lm_loss_chunk_tokens: int = DEFAULT_LM_LOSS_CHUNK_TOKENS
     # warmup 占总训练步数比例。
     warmup_ratio: float = DEFAULT_WARMUP_RATIO
     # 随机种子，覆盖数据 shuffle、LongRoPE2 窗口采样和 torch 随机数。
@@ -191,6 +205,26 @@ class BaseTrainingRecipeConfig:
     deterministic_algorithms: bool = DEFAULT_DETERMINISTIC_ALGORITHMS
     # 是否启用 sequence packing；packing 会生成 segment_ids 阻断跨样本注意力。
     sequence_packing_enabled: bool = DEFAULT_SEQUENCE_PACKING_ENABLED
+    # batch 预处理 worker 数；设为 0 时在训练主进程同步执行，适合测试和 CPU smoke。
+    data_num_workers: int = DEFAULT_DATA_NUM_WORKERS
+    # 每个预处理 worker 的预取 batch 数，仅在 data_num_workers > 0 时生效。
+    data_prefetch_factor: int = DEFAULT_DATA_PREFETCH_FACTOR
+    # 是否跨 epoch 保持预处理 worker，避免 Windows 重复创建进程。
+    data_persistent_workers: bool = DEFAULT_DATA_PERSISTENT_WORKERS
+    # 是否使用锁页内存，为 CUDA non_blocking H2D 拷贝提供前提。
+    data_pin_memory: bool = DEFAULT_DATA_PIN_MEMORY
+    # 原始 JSONL 解析 worker 数；0 表示由训练主进程同步读取。
+    data_reader_num_workers: int = DEFAULT_DATA_READER_NUM_WORKERS
+    # JSONL reader 单个字节 chunk 大小。
+    data_reader_chunk_bytes: int = DEFAULT_DATA_READER_CHUNK_BYTES
+    # 有界长度排序窗口；0 表示不做长度重排。
+    data_length_bucket_window: int = 0
+    # packing 装箱策略：sequential 保持旧 next-fit，first_fit 减少容量碎片。
+    data_packing_strategy: str = "sequential"
+    # 离线 token cache 目录；None 表示由具体阶段 recipe 或 CLI 指定。
+    token_cache_dir: Path | None = None
+    # 是否启用离线 token cache；各阶段 recipe 决定默认值。
+    token_cache_enabled: bool = DEFAULT_TOKEN_CACHE_ENABLED
     # 训练时使用的原生 thinking 策略；text 阶段默认 off，chat 阶段可覆盖为 auto。
     thinking_mode: str = "off"
     # 训练可见性仅写入审计元数据，不改变 loss 或 batch 构造。
@@ -250,12 +284,22 @@ class BaseTrainingRecipeConfig:
         """校验 recipe 的工程边界，避免 CLI 覆盖项生成不可续训的配置。"""
         if self.target_total_epochs <= 0:
             raise ValueError("target_total_epochs 必须为正整数。")
-        if self.batch_size <= 0:
-            raise ValueError("batch_size 必须为正整数。")
         if self.max_steps is not None and self.max_steps <= 0:
             raise ValueError("max_steps 必须为正整数。")
         if self.gradient_accumulation_steps <= 0:
             raise ValueError("gradient_accumulation_steps 必须为正整数。")
+        if self.data_num_workers < 0:
+            raise ValueError("data_num_workers 必须为非负整数。")
+        if self.data_prefetch_factor <= 0:
+            raise ValueError("data_prefetch_factor 必须为正整数。")
+        if self.data_reader_num_workers < 0:
+            raise ValueError("data_reader_num_workers 必须为非负整数。")
+        if self.data_reader_chunk_bytes <= 0:
+            raise ValueError("data_reader_chunk_bytes 必须为正整数。")
+        if self.data_length_bucket_window < 0:
+            raise ValueError("data_length_bucket_window 必须为非负整数。")
+        if self.data_packing_strategy not in {"sequential", "first_fit"}:
+            raise ValueError("data_packing_strategy 必须是 sequential 或 first_fit。")
         if not 0.0 <= float(self.warmup_ratio) <= 1.0:
             raise ValueError("warmup_ratio 必须在 [0, 1] 范围内。")
         if self.eval_max_batches is not None and self.eval_max_batches <= 0:
@@ -272,6 +316,8 @@ class BaseTrainingRecipeConfig:
             raise ValueError("thinking_mode 必须是 off/on/auto。")
         if self.thinking_visibility not in {"hidden", "visible"}:
             raise ValueError("thinking_visibility 必须是 hidden/visible。")
+        if self.optimizer_type not in {"adamw", "adamw8bit"}:
+            raise ValueError("optimizer_type 必须是 adamw 或 adamw8bit。")
 
 
 @dataclass(frozen=True)
@@ -284,14 +330,21 @@ class TextPretrainingConfig(BaseTrainingRecipeConfig):
     manifest_path: Path | None = TEXT_PRETRAIN_MANIFEST_PATH
     # text_pretrain 默认产物目录。
     artifact_dir: Path | None = TEXT_PRETRAIN_ARTIFACT_DIR
-    # text_pretrain 默认 batch size。
-    batch_size: int = TEXT_PRETRAIN_BATCH_SIZE
+    # 文本长短差异较大，按训练窗口 token 预算自动组批。
     # text_pretrain 默认 epoch 数。
     target_total_epochs: int = TEXT_PRETRAIN_EPOCHS
     # text_pretrain 默认学习率。
     learning_rate: float = TEXT_PRETRAIN_LEARNING_RATE
     # text_pretrain 默认 warmup 比例。
     warmup_ratio: float = TEXT_PRETRAIN_WARMUP_RATIO
+    # first-fit packing 已处理长度差异；默认不再把长样本集中到同一批。
+    data_length_bucket_window: int = DEFAULT_DATA_LENGTH_BUCKET_WINDOW
+    # text 预训练优先使用 first-fit，降低 packing 后的容量碎片。
+    data_packing_strategy: str = DEFAULT_DATA_PACKING_STRATEGY
+    # text 预训练默认启用离线 token cache，避免大 JSONL 启动扫描单核阻塞。
+    token_cache_enabled: bool = TEXT_PRETRAIN_TOKEN_CACHE_ENABLED
+    # text 预训练默认 cache 目录。
+    token_cache_dir: Path | None = DEFAULT_TOKEN_CACHE_DIR / "text_pretrain"
 
 
 @dataclass(frozen=True)
@@ -304,8 +357,7 @@ class ChatSFTTrainingConfig(BaseTrainingRecipeConfig):
     manifest_path: Path | None = CHAT_SFT_MANIFEST_PATH
     # chat_sft 默认产物目录。
     artifact_dir: Path | None = CHAT_SFT_ARTIFACT_DIR
-    # chat_sft 默认 batch size。
-    batch_size: int = CHAT_SFT_BATCH_SIZE
+    # 短对话自动增大批量，长对话自动缩小到单样本。
     # chat_sft 默认 epoch 数。
     target_total_epochs: int = CHAT_SFT_EPOCHS
     # chat_sft 默认学习率。
@@ -314,6 +366,9 @@ class ChatSFTTrainingConfig(BaseTrainingRecipeConfig):
     warmup_ratio: float = CHAT_SFT_WARMUP_RATIO
     # chat SFT 默认按样本内非空 thinking 字段自动切换分支。
     thinking_mode: str = "auto"
+    # SFT 缓存完整的对话监督序列，训练时仍动态执行截断和 packing。
+    token_cache_enabled: bool = CHAT_SFT_TOKEN_CACHE_ENABLED
+    token_cache_dir: Path | None = DEFAULT_TOKEN_CACHE_DIR / "chat_sft"
 
 
 @dataclass(frozen=True)
@@ -326,8 +381,7 @@ class ChatLoRATrainingConfig(BaseTrainingRecipeConfig):
     manifest_path: Path | None = CHAT_LORA_MANIFEST_PATH
     # chat_lora 默认产物目录。
     artifact_dir: Path | None = CHAT_LORA_ARTIFACT_DIR
-    # chat_lora 默认 batch size。
-    batch_size: int = CHAT_LORA_BATCH_SIZE
+    # LoRA 与 SFT 使用同一套动态 token 预算，避免长样本造成显存峰值。
     # chat_lora 默认 epoch 数。
     target_total_epochs: int = CHAT_LORA_EPOCHS
     # chat_lora 默认学习率。
@@ -336,6 +390,9 @@ class ChatLoRATrainingConfig(BaseTrainingRecipeConfig):
     warmup_ratio: float = CHAT_LORA_WARMUP_RATIO
     # chat LoRA 默认按样本内非空 thinking 字段自动切换分支。
     thinking_mode: str = "auto"
+    # LoRA 与 SFT 使用相同的对话预编码缓存实现，目录按阶段隔离。
+    token_cache_enabled: bool = CHAT_LORA_TOKEN_CACHE_ENABLED
+    token_cache_dir: Path | None = DEFAULT_TOKEN_CACHE_DIR / "chat_lora"
     # LoRA 训练使用的基座来源。
     lora_base_source: str = DEFAULT_LORA_BASE_SOURCE
     # LoRA 低秩 rank。

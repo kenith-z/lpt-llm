@@ -112,6 +112,8 @@ def load_dataset_from_manifest(
     expected_types,
     seed=DEFAULT_TRAINING_SEED,
     shuffle_buffer_size=None,
+    reader_num_workers=0,
+    reader_chunk_bytes=32 * 1024 * 1024,
 ):
     """按 manifest 构造流式训练数据集。"""
     dataset = build_streaming_manifest_dataset(
@@ -119,12 +121,169 @@ def load_dataset_from_manifest(
         expected_types=expected_types,
         shuffle_buffer_size=shuffle_buffer_size or GlobalConfig.dataset_shuffle_buffer_size,
         seed=seed,
+        reader_num_workers=reader_num_workers,
+        reader_chunk_bytes=reader_chunk_bytes,
     )
     print(f"manifest={manifest_path}")
     print(f"datasets={dataset.loaded_datasets}")
     print(f"types={dataset.summary_types}")
     print(f"sources={dataset.summary_sources}")
     return dataset
+
+
+def _completed_chat_cache_entries(manifest_path, cache_dir, tokenizer, args, resume_checkpoint):
+    """只跳过进度已完成且缓存仍与当前编码策略一致的源文件。"""
+    if resume_checkpoint is None:
+        return {}
+    from lpt_data.chat_token_cache_dataset import (
+        ChatTokenCache,
+        _chat_tokenizer_fingerprint,
+        _encoding_signature,
+        chat_cache_subdir_name,
+    )
+    from lpt_data.io import entry_progress_key, load_manifest_entries, resolve_manifest_dataset_path
+    from lpt_training import load_data_progress
+
+    progress = load_data_progress(resume_checkpoint)
+    if not isinstance(progress, dict):
+        return {}
+    progress_entries = progress.get("entries")
+    if not isinstance(progress_entries, list):
+        return {}
+    previous = {
+        item["entry_key"]: item
+        for item in progress_entries
+        if isinstance(item, dict) and isinstance(item.get("entry_key"), str)
+    }
+    tokenizer_hash = _chat_tokenizer_fingerprint(tokenizer)["sha256"]
+    encoding = _encoding_signature(
+        thinking_mode=args.thinking_mode,
+        template_version=GlobalConfig.chat_template_version,
+        max_sequence_length=None,
+        expected_types={"chat"},
+    )
+    manifest_path, entries = load_manifest_entries(manifest_path)
+    completed = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("enabled", True) is False:
+            continue
+        raw_path = entry.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        path = resolve_manifest_dataset_path(manifest_path, raw_path)
+        key = entry_progress_key(entry.get("name") or path.stem, path)
+        state = previous.get(key)
+        if not state:
+            continue
+        # 完成记录仅适用于原采样策略；策略变化交给训练器校验并给出续训错误。
+        if (
+            float(state.get("weight", 1.0)) != float(entry.get("weight", 1.0))
+            or state.get("sample_limit") != entry.get("sample_limit")
+        ):
+            continue
+        target_samples = int(state.get("target_total_samples", 0) or 0)
+        source_count = int(state.get("source_record_count", -1))
+        if (
+            int(state.get("completed_epochs", 0) or 0) < int(args.epochs)
+            or int(state.get("total_consumed_samples", 0) or 0) < target_samples
+            or source_count < 0
+        ):
+            continue
+        cache_path = Path(cache_dir) / chat_cache_subdir_name(path)
+        if not cache_path.is_dir():
+            continue
+        try:
+            cache = ChatTokenCache(cache_path)
+            try:
+                compatible = (
+                    cache.fingerprint_matches([path])
+                    and cache.manifest.get("tokenizer", {}).get("sha256") == tokenizer_hash
+                    and cache.manifest.get("encoding") == encoding
+                    and len(cache) == source_count
+                )
+            finally:
+                cache.close()
+        except (OSError, ValueError, KeyError, TypeError):
+            compatible = False
+        if compatible:
+            completed[key] = source_count
+    return completed
+
+
+def load_chat_training_dataset(manifest_path, tokenizer, args, *, resume_checkpoint=None):
+    """统一构造 SFT/LoRA 对话数据集，优先复用按源文件生成的预编码缓存。
+
+    缓存只保存单条样本的训练序列；epoch 洗牌、窗口截断和 batch packing
+    仍由训练阶段决定。磁盘或编码器不可用时保留 JSONL 流式回退路径。
+    """
+    from lpt_data.chat_token_cache_dataset import (
+        ChatTokenCacheManifestDataset,
+        ensure_manifest_chat_token_cache,
+    )
+
+    cache_dir = getattr(args, "token_cache_dir", None)
+    if getattr(args, "token_cache_enabled", False) and cache_dir is not None:
+        try:
+            completed_entries = _completed_chat_cache_entries(
+                manifest_path, cache_dir, tokenizer, args, resume_checkpoint,
+            )
+            from lpt_data.io import load_manifest_entries, resolve_manifest_dataset_path, entry_progress_key
+
+            _, manifest_entries = load_manifest_entries(manifest_path)
+            skip_paths = [
+                resolve_manifest_dataset_path(manifest_path, entry["path"])
+                for entry in manifest_entries
+                if isinstance(entry, dict)
+                and entry.get("enabled", True) is not False
+                and isinstance(entry.get("path"), str)
+                and entry_progress_key(
+                    entry.get("name") or Path(entry["path"]).stem,
+                    resolve_manifest_dataset_path(manifest_path, entry["path"]),
+                ) in completed_entries
+            ]
+            cache_dir = ensure_manifest_chat_token_cache(
+                manifest_path,
+                cache_dir,
+                tokenizer,
+                expected_types={"chat"},
+                thinking_mode=args.thinking_mode,
+                template_version=GlobalConfig.chat_template_version,
+                # 保留完整样本，LongRoPE2 可在每个 batch 动态选取窗口。
+                max_sequence_length=None,
+                num_workers=args.data_reader_num_workers,
+                chunk_bytes=args.data_reader_chunk_bytes,
+                skip_paths=skip_paths,
+            )
+            dataset = ChatTokenCacheManifestDataset(
+                manifest_path=manifest_path,
+                cache_dir=cache_dir,
+                expected_types={"chat"},
+                shuffle_buffer_size=GlobalConfig.dataset_shuffle_buffer_size,
+                seed=args.seed,
+                completed_entries=completed_entries,
+                max_sequence_length=None,
+            )
+            print(f"manifest={manifest_path}")
+            print(f"token_cache={cache_dir}")
+            print(f"datasets={dataset.loaded_datasets}")
+            print(f"types={dataset.summary_types}")
+            print(f"sources={dataset.summary_sources}")
+            return dataset, cache_dir
+        except Exception as exc:
+            if getattr(args, "build_cache_only", False):
+                raise RuntimeError("对话 token cache 构建失败。") from exc
+            print(f"对话 token cache 不可用，回退 JSONL 流式读取: {exc}")
+
+    if getattr(args, "build_cache_only", False):
+        raise ValueError("只构建缓存时必须启用 token cache 并设置缓存目录。")
+    dataset = load_dataset_from_manifest(
+        manifest_path,
+        expected_types={"chat"},
+        seed=args.seed,
+        reader_num_workers=args.data_reader_num_workers,
+        reader_chunk_bytes=args.data_reader_chunk_bytes,
+    )
+    return dataset, None
 
 
 def load_structured_dataset(dataset_path, *, expected_types=None):
@@ -353,18 +512,21 @@ def add_training_arguments(parser, recipe=None):
     """注册通用训练参数。"""
     recipe = recipe or DEFAULT_TRAINING_RECIPE
     add_model_arguments(parser, recipe=recipe)
-    parser.add_argument("--batch-size", type=int, default=recipe.batch_size, help="训练 batch size。")
     parser.add_argument("--epochs", type=int, default=recipe.target_total_epochs, help="训练 epoch 数。")
     parser.add_argument("--target-total-epochs", dest="epochs", type=int, help="训练总 epoch 数，等价于 --epochs。")
     parser.add_argument("--max-steps", type=int, default=recipe.max_steps, help="最多训练 step 数；不传表示按 epochs 跑完整数据。")
     parser.add_argument("--learning-rate", type=float, default=recipe.learning_rate, help="AdamW 学习率。")
     parser.add_argument("--weight-decay", type=float, default=recipe.weight_decay, help="权重衰减。")
+    parser.add_argument("--optimizer-type", choices=("adamw", "adamw8bit"), default=recipe.optimizer_type, help="优化器类型：adamw 或 adamw8bit（8bit 量化优化器状态）。")
+    parser.add_argument("--gradient-checkpointing", action="store_true", default=recipe.gradient_checkpointing, help="启用梯度检查点以节省激活值显存。")
+    parser.add_argument("--no-gradient-checkpointing", dest="gradient_checkpointing", action="store_false", help="关闭梯度检查点。")
     parser.add_argument("--gradient-accumulation-steps", type=int, default=recipe.gradient_accumulation_steps, help="梯度累积步数。")
     parser.add_argument("--max-grad-norm", type=float, default=recipe.max_grad_norm, help="梯度裁剪阈值。")
+    parser.add_argument("--lm-loss-chunk-tokens", type=int, default=recipe.lm_loss_chunk_tokens, help="LM loss 分块 token 数；显存充足时调大可减少 kernel 调度。")
     parser.add_argument("--warmup-ratio", type=float, default=recipe.warmup_ratio, help="warmup 占计划训练 step 数的比例。")
     parser.add_argument("--log-interval", type=int, default=recipe.log_interval_steps, help="日志间隔。")
     parser.add_argument("--eval-interval", type=int, default=recipe.eval_interval_steps, help="验证间隔，0 表示关闭。")
-    parser.add_argument("--eval-batch-size", type=int, default=recipe.eval_batch_size, help="验证 batch size，默认沿用训练 batch size。")
+    parser.add_argument("--eval-batch-size", type=int, default=recipe.eval_batch_size, help="验证 batch size，默认使用单样本验证批。")
     parser.add_argument("--eval-max-batches", type=int, default=recipe.eval_max_batches, help="每次验证最多 batch 数；不传表示完整验证集。")
     parser.add_argument("--save-interval", type=int, default=recipe.save_interval_steps, help="额外 step_N checkpoint 间隔，0 表示关闭。")
     parser.add_argument("--latest-save-interval", type=int, default=recipe.latest_save_interval_steps, help="覆盖 latest checkpoint 间隔，0 表示仅训练结束保存。")
@@ -376,6 +538,18 @@ def add_training_arguments(parser, recipe=None):
     parser.add_argument("--deterministic", dest="deterministic_algorithms", action="store_true", default=recipe.deterministic_algorithms, help="启用确定性算法。")
     parser.add_argument("--no-deterministic", dest="deterministic_algorithms", action="store_false", help="关闭确定性算法。")
     parser.add_argument("--no-sequence-packing", action="store_true", default=not recipe.sequence_packing_enabled, help="关闭 sequence packing。")
+    parser.add_argument("--data-num-workers", type=int, default=recipe.data_num_workers, help="训练 batch 预处理进程数；0 表示在主进程同步执行。")
+    parser.add_argument("--data-prefetch-factor", type=int, default=recipe.data_prefetch_factor, help="每个预处理进程提前准备的 batch 数。")
+    parser.add_argument("--data-persistent-workers", dest="data_persistent_workers", action="store_true", default=recipe.data_persistent_workers, help="跨 epoch 复用预处理进程。")
+    parser.add_argument("--no-data-persistent-workers", dest="data_persistent_workers", action="store_false", help="每轮结束后关闭预处理进程。")
+    parser.add_argument("--data-pin-memory", dest="data_pin_memory", action="store_true", default=recipe.data_pin_memory, help="启用训练 batch 锁页内存。")
+    parser.add_argument("--no-data-pin-memory", dest="data_pin_memory", action="store_false", help="关闭训练 batch 锁页内存。")
+    parser.add_argument("--data-reader-num-workers", type=int, default=recipe.data_reader_num_workers, help="原始 JSONL 解析进程数；0 表示主进程同步读取。")
+    parser.add_argument("--data-reader-chunk-bytes", type=int, default=recipe.data_reader_chunk_bytes, help="JSONL reader 每个字节 chunk 大小。")
+    parser.add_argument("--data-length-bucket-window", type=int, default=recipe.data_length_bucket_window, help="长度排序窗口中的样本数；0 表示关闭。")
+    parser.add_argument("--data-packing-strategy", choices=("sequential", "first_fit"), default=recipe.data_packing_strategy, help="sequence packing 装箱策略。")
+    parser.add_argument("--token-cache-dir", type=Path, default=recipe.token_cache_dir, help="离线 token cache 目录；首次启动会并行构建，之后直接 mmap 复用。")
+    parser.add_argument("--no-token-cache", dest="token_cache_enabled", action="store_false", default=recipe.token_cache_enabled, help="关闭离线 token cache，回退到 JSONL 流式读取。")
     parser.add_argument("--training-thinking-mode", dest="thinking_mode", choices=("off", "on", "auto"), default=recipe.thinking_mode, help="训练时的原生 thinking 策略。")
     parser.add_argument("--training-thinking-visibility", dest="thinking_visibility", choices=("hidden", "visible"), default=recipe.thinking_visibility, help="训练 thinking 可见性审计字段，不影响 loss。")
     parser.add_argument("--no-resume", action="store_true", help="忽略 latest checkpoint，重新训练。")
@@ -444,13 +618,13 @@ def merge_training_args_with_recipe(args, recipe):
         "dtype": recipe.dtype,
         "manifest_path": recipe.manifest_path,
         "artifact_dir": recipe.artifact_dir,
-        "batch_size": recipe.batch_size,
         "epochs": recipe.target_total_epochs,
         "max_steps": recipe.max_steps,
         "learning_rate": recipe.learning_rate,
         "weight_decay": recipe.weight_decay,
         "gradient_accumulation_steps": recipe.gradient_accumulation_steps,
         "max_grad_norm": recipe.max_grad_norm,
+        "lm_loss_chunk_tokens": recipe.lm_loss_chunk_tokens,
         "warmup_ratio": recipe.warmup_ratio,
         "log_interval": recipe.log_interval_steps,
         "eval_interval": recipe.eval_interval_steps,
@@ -465,6 +639,17 @@ def merge_training_args_with_recipe(args, recipe):
         "seed": recipe.random_seed,
         "deterministic_algorithms": recipe.deterministic_algorithms,
         "no_sequence_packing": not recipe.sequence_packing_enabled,
+        "data_num_workers": recipe.data_num_workers,
+        "data_prefetch_factor": recipe.data_prefetch_factor,
+        "data_persistent_workers": recipe.data_persistent_workers,
+        "data_pin_memory": recipe.data_pin_memory,
+        "data_reader_num_workers": recipe.data_reader_num_workers,
+        "data_reader_chunk_bytes": recipe.data_reader_chunk_bytes,
+        "data_length_bucket_window": recipe.data_length_bucket_window,
+        "data_packing_strategy": recipe.data_packing_strategy,
+        "token_cache_dir": recipe.token_cache_dir,
+        "token_cache_enabled": recipe.token_cache_enabled,
+        "build_cache_only": False,
         "thinking_mode": recipe.thinking_mode,
         "thinking_visibility": recipe.thinking_visibility,
         "no_resume": False,

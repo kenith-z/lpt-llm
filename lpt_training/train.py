@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 import hashlib
 import json
 import math
+import multiprocessing
+import os
 from pathlib import Path
 import random
 import shutil
@@ -19,8 +24,15 @@ from tqdm import tqdm
 from lpt_config import (
     DEFAULT_EVAL_MAX_BATCHES,
     DEFAULT_DETERMINISTIC_ALGORITHMS,
+    DEFAULT_DATA_NUM_WORKERS,
+    DEFAULT_DATA_READER_CHUNK_BYTES,
+    DEFAULT_DATA_READER_NUM_WORKERS,
+    DEFAULT_DATA_PERSISTENT_WORKERS,
+    DEFAULT_DATA_PIN_MEMORY,
+    DEFAULT_DATA_PREFETCH_FACTOR,
     DEFAULT_GRADIENT_ACCUMULATION_STEPS,
     DEFAULT_LATEST_SAVE_INTERVAL_STEPS,
+    DEFAULT_LM_LOSS_CHUNK_TOKENS,
     DEFAULT_LOG_INTERVAL_STEPS,
     DEFAULT_MAX_GRAD_NORM,
     DEFAULT_BEST_CHECKPOINT_METRIC,
@@ -31,7 +43,6 @@ from lpt_config import (
     DEFAULT_SAVE_SCHEDULER,
     DEFAULT_SEQUENCE_PACKING_ENABLED,
     DEFAULT_TENSORBOARD_ENABLED,
-    DEFAULT_TRAINING_BATCH_SIZE,
     DEFAULT_TRAINING_EPOCHS,
     DEFAULT_TRAINING_LEARNING_RATE,
     DEFAULT_TRAINING_MAX_STEPS,
@@ -40,7 +51,18 @@ from lpt_config import (
     DEFAULT_WEIGHT_DECAY,
     GlobalConfig,
 )
+from lpt_config.constants import DEFAULT_OPTIMIZER_TYPE, DEFAULT_GRADIENT_CHECKPOINTING
 from lpt_data import DATA_PROGRESS_RECORD_KEY, build_packed_training_batch, build_training_batch
+from lpt_data.batching import (
+    encode_training_sample,
+    PRE_TOKENIZED_CHAT_INPUT_IDS,
+    PRE_TOKENIZED_CHAT_LABELS,
+    PRE_TOKENIZED_CHAT_THINKING_MODE_IDS,
+    PRE_TOKENIZED_CHAT_TARGET_CHANNEL_IDS,
+)
+from lpt_data.cache import JSONLReaderPool
+from lpt_data.chat_token_cache_dataset import PRE_TOKENIZED_CHAT_THINKING_SUMMARY
+from lpt_data.token_cache_dataset import PRE_TOKENIZED_TOKEN_LENGTH
 from lpt_lora import save_lora_adapter_state
 from lpt_model import save_lpt_v2_checkpoint
 from lpt_protocol import THINKING_MODE_OFF, THINKING_MODE_ON, normalize_thinking_mode
@@ -59,6 +81,7 @@ MODEL_CHECKPOINT_NAME = "model.pt"
 LORA_ADAPTER_CHECKPOINT_NAME = "adapter.pt"
 OPTIMIZER_CHECKPOINT_NAME = "optimizer.pt"
 SCHEDULER_CHECKPOINT_NAME = "scheduler.pt"
+RNG_STATE_NAME = "rng_state.pt"
 TRAINER_STATE_NAME = "trainer_state.json"
 DATA_PROGRESS_NAME = "data_progress.json"
 METRICS_JSONL_NAME = "metrics.jsonl"
@@ -66,8 +89,21 @@ CHECKPOINT_MANIFEST_NAME = "checkpoint_manifest.json"
 TRAINING_CHECKPOINT_FORMAT = "lpt_v2_training_checkpoint"
 TRAINING_CHECKPOINT_SCHEMA_VERSION = 1
 DATA_PROGRESS_SCHEMA_VERSION = 1
-LM_LOSS_CHUNK_TOKENS = 256
+# 保持旧常量名兼容内部引用；默认值统一由 lpt_config.constants 提供，
+# recipe/CLI 可通过 lm_loss_chunk_tokens 覆盖。
+LM_LOSS_CHUNK_TOKENS = DEFAULT_LM_LOSS_CHUNK_TOKENS
 THINKING_VISIBILITIES = ("hidden", "visible")
+TRAINING_EPOCH_RECORD_KEY = "_lpt_training_epoch"
+THINKING_SUMMARY_COUNTER_KEYS = (
+    "text_samples",
+    "chat_samples",
+    "assistant_messages",
+    "assistant_messages_with_thinking_field",
+    "assistant_messages_with_nonempty_thinking",
+    "assistant_messages_with_empty_thinking",
+    "assistant_messages_thinking_on",
+    "assistant_messages_thinking_off",
+)
 
 
 def _normalize_thinking_visibility(visibility):
@@ -92,6 +128,9 @@ METRIC_DISPLAY_NAMES = {
     "samples_seen": "已见样本(samples_seen)",
     "tokens_seen": "已见Token(tokens_seen)",
     "sequence_length": "序列长度(sequence_length)",
+    "packed_rows": "填充行数(packed_rows)",
+    "padded_tokens": "填充Token(padded_tokens)",
+    "attention_token_square": "注意力规模(attention_token_square)",
     "target_tokens": "目标Token(target_tokens)",
     "tokens_per_sec": "Token吞吐(tokens_per_sec)",
     "samples_per_sec": "样本吞吐(samples_per_sec)",
@@ -101,6 +140,9 @@ METRIC_DISPLAY_NAMES = {
     "cuda_peak_memory_allocated_mib": "CUDA分配峰值MiB(cuda_peak_memory_allocated_mib)",
     "cuda_peak_memory_reserved_mib": "CUDA保留峰值MiB(cuda_peak_memory_reserved_mib)",
     "elapsed_seconds": "耗时秒(elapsed_seconds)",
+    "run_id": "运行ID(run_id)",
+    "process_id": "进程ID(process_id)",
+    "wall_time_unix": "墙钟Unix秒(wall_time_unix)",
     "eval_loss": "验证损失(eval_loss)",
     "eval_ppl": "验证困惑度(eval_ppl)",
     "eval_target_tokens": "验证目标Token(eval_target_tokens)",
@@ -117,13 +159,16 @@ class TrainingRunConfig:
     checkpoint_dir: Path
     inference_weight_path: Path
     save_inference_weights: bool = True
-    batch_size: int = DEFAULT_TRAINING_BATCH_SIZE
     epochs: int = DEFAULT_TRAINING_EPOCHS
     max_steps: int | None = DEFAULT_TRAINING_MAX_STEPS
     learning_rate: float = DEFAULT_TRAINING_LEARNING_RATE
     weight_decay: float = DEFAULT_WEIGHT_DECAY
+    optimizer_type: str = DEFAULT_OPTIMIZER_TYPE
+    gradient_checkpointing: bool = DEFAULT_GRADIENT_CHECKPOINTING
     gradient_accumulation_steps: int = DEFAULT_GRADIENT_ACCUMULATION_STEPS
     max_grad_norm: float = DEFAULT_MAX_GRAD_NORM
+    # LM loss 分块 token 数，控制大 vocab 下 loss 临时张量的峰值显存。
+    lm_loss_chunk_tokens: int = LM_LOSS_CHUNK_TOKENS
     warmup_ratio: float = DEFAULT_WARMUP_RATIO
     log_interval: int = DEFAULT_LOG_INTERVAL_STEPS
     eval_interval: int = 0
@@ -155,6 +200,17 @@ class TrainingRunConfig:
     run_id: str | None = None
     tensorboard_enabled: bool = DEFAULT_TENSORBOARD_ENABLED
     tensorboard_dir: Path | None = None
+    data_num_workers: int = DEFAULT_DATA_NUM_WORKERS
+    data_prefetch_factor: int = DEFAULT_DATA_PREFETCH_FACTOR
+    data_persistent_workers: bool = DEFAULT_DATA_PERSISTENT_WORKERS
+    data_pin_memory: bool = DEFAULT_DATA_PIN_MEMORY
+    data_reader_num_workers: int = DEFAULT_DATA_READER_NUM_WORKERS
+    data_reader_chunk_bytes: int = DEFAULT_DATA_READER_CHUNK_BYTES
+    # 直接构造 TrainingRunConfig 时保持旧顺序；阶段 recipe 会显式注入优化值。
+    data_length_bucket_window: int = 0
+    data_packing_strategy: str = "sequential"
+    token_cache_dir: Path | None = None
+    token_cache_enabled: bool = False
 
     def __post_init__(self):
         """规范化路径和数值字段，保证训练状态可以稳定序列化与续训。"""
@@ -176,6 +232,9 @@ class TrainingRunConfig:
             self.eval_manifest = Path(self.eval_manifest)
         if self.tensorboard_dir is not None:
             self.tensorboard_dir = Path(self.tensorboard_dir)
+        if self.token_cache_dir is not None:
+            self.token_cache_dir = Path(self.token_cache_dir)
+        self.token_cache_enabled = bool(self.token_cache_enabled)
         if self.longrope2_window_lengths is not None:
             lengths = tuple(int(value) for value in self.longrope2_window_lengths)
             if not lengths or any(value <= 0 for value in lengths):
@@ -192,8 +251,6 @@ class TrainingRunConfig:
             and len(self.longrope2_window_lengths) != len(self.longrope2_window_weights)
         ):
             raise ValueError("longrope2_window_lengths 与 longrope2_window_weights 长度必须一致。")
-        if int(self.batch_size) <= 0:
-            raise ValueError("batch_size 必须为正整数。")
         if self.max_steps is not None:
             self.max_steps = int(self.max_steps)
         if self.max_steps is not None and self.max_steps <= 0:
@@ -202,6 +259,9 @@ class TrainingRunConfig:
             raise ValueError("gradient_accumulation_steps 必须为正整数。")
         if not 0.0 <= float(self.warmup_ratio) <= 1.0:
             raise ValueError("warmup_ratio 必须在 [0, 1] 范围内。")
+        self.lm_loss_chunk_tokens = int(self.lm_loss_chunk_tokens)
+        if self.lm_loss_chunk_tokens <= 0:
+            raise ValueError("lm_loss_chunk_tokens 必须为正整数。")
         if self.eval_batch_size is not None and int(self.eval_batch_size) <= 0:
             raise ValueError("eval_batch_size 必须为正整数。")
         if self.eval_max_batches is not None:
@@ -222,6 +282,29 @@ class TrainingRunConfig:
         self.key_checkpoints = tuple(sorted({int(value) for value in self.key_checkpoints if int(value) > 0}))
         self.thinking_mode = normalize_thinking_mode(self.thinking_mode)
         self.thinking_visibility = _normalize_thinking_visibility(self.thinking_visibility)
+        if self.optimizer_type not in {"adamw", "adamw8bit"}:
+            raise ValueError("optimizer_type 必须是 adamw 或 adamw8bit。")
+        self.gradient_checkpointing = bool(self.gradient_checkpointing)
+        self.data_num_workers = int(self.data_num_workers)
+        if self.data_num_workers < 0:
+            raise ValueError("data_num_workers 必须为非负整数。")
+        self.data_prefetch_factor = int(self.data_prefetch_factor)
+        if self.data_prefetch_factor <= 0:
+            raise ValueError("data_prefetch_factor 必须为正整数。")
+        self.data_persistent_workers = bool(self.data_persistent_workers)
+        self.data_pin_memory = bool(self.data_pin_memory)
+        self.data_reader_num_workers = int(self.data_reader_num_workers)
+        if self.data_reader_num_workers < 0:
+            raise ValueError("data_reader_num_workers 必须为非负整数。")
+        self.data_reader_chunk_bytes = int(self.data_reader_chunk_bytes)
+        if self.data_reader_chunk_bytes <= 0:
+            raise ValueError("data_reader_chunk_bytes 必须为正整数。")
+        self.data_length_bucket_window = int(self.data_length_bucket_window)
+        if self.data_length_bucket_window < 0:
+            raise ValueError("data_length_bucket_window 必须为非负整数。")
+        self.data_packing_strategy = str(self.data_packing_strategy).strip().lower()
+        if self.data_packing_strategy not in {"sequential", "first_fit"}:
+            raise ValueError("data_packing_strategy 必须是 sequential 或 first_fit。")
 
 
 def configure_training_runtime(seed=DEFAULT_TRAINING_SEED, *, deterministic=False):
@@ -318,6 +401,8 @@ def _required_checkpoint_files(lora_mode, state, *, require_optimizer):
         required_names.add(OPTIMIZER_CHECKPOINT_NAME)
     if _training_state_flag(state, "save_scheduler", False):
         required_names.add(SCHEDULER_CHECKPOINT_NAME)
+    if bool(state.get("rng_state_saved", False)):
+        required_names.add(RNG_STATE_NAME)
     return required_names
 
 
@@ -357,6 +442,8 @@ def _checkpoint_manifest_is_valid(root, *, lora_mode, require_optimizer):
         torch_files.append(root / OPTIMIZER_CHECKPOINT_NAME)
     if SCHEDULER_CHECKPOINT_NAME in required_names:
         torch_files.append(root / SCHEDULER_CHECKPOINT_NAME)
+    if RNG_STATE_NAME in required_names:
+        torch_files.append(root / RNG_STATE_NAME)
     return all(_has_readable_torch_file(path) for path in torch_files)
 
 
@@ -474,8 +561,21 @@ def _parameter_group_summary(parameter_group):
     }
 
 
-def _build_optimizer(model, *, learning_rate, weight_decay):
-    """构造 AdamW，并按 norm/bias 与低维参数拆分 weight decay。"""
+def _build_optimizer(model, *, learning_rate, weight_decay, optimizer_type=DEFAULT_OPTIMIZER_TYPE):
+    """构造优化器，并按 norm/bias 与低维参数拆分 weight decay。
+
+    Args:
+        model: 待优化的模型。
+        learning_rate: 学习率。
+        weight_decay: 权重衰减系数。
+        optimizer_type: 优化器类型，"adamw" 或 "adamw8bit"。
+
+    Returns:
+        (optimizer, summary): 优化器实例和参数分组摘要。
+
+    Raises:
+        ValueError: 如果优化器类型不支持或缺少依赖。
+    """
     decay_parameters = []
     no_decay_parameters = []
     for parameter_name, parameter in _iter_trainable_parameters(model):
@@ -490,14 +590,32 @@ def _build_optimizer(model, *, learning_rate, weight_decay):
         groups.append({"params": no_decay_parameters, "weight_decay": 0.0})
     if not groups:
         raise ValueError("模型没有可训练参数。")
+
+    # 根据 optimizer_type 选择优化器
+    if optimizer_type == "adamw":
+        optimizer = torch.optim.AdamW(groups, lr=float(learning_rate))
+        optimizer_name = "AdamW"
+    elif optimizer_type == "adamw8bit":
+        try:
+            import bitsandbytes as bnb
+        except ImportError:
+            raise ValueError(
+                "optimizer_type='adamw8bit' 需要 bitsandbytes 库。\n"
+                "请安装: pip install bitsandbytes"
+            )
+        optimizer = bnb.optim.AdamW8bit(groups, lr=float(learning_rate))
+        optimizer_name = "AdamW8bit"
+    else:
+        raise ValueError(f"不支持的优化器类型: {optimizer_type}，支持 'adamw' 或 'adamw8bit'。")
+
     summary = {
-        "optimizer": "AdamW",
+        "optimizer": optimizer_name,
         "learning_rate": float(learning_rate),
         "weight_decay": float(weight_decay),
         "decay": _parameter_group_summary(decay_parameters),
         "no_decay": _parameter_group_summary(no_decay_parameters),
     }
-    return torch.optim.AdamW(groups, lr=float(learning_rate)), summary
+    return optimizer, summary
 
 
 def _linear_warmup_cosine_lambda(current_step, *, warmup_steps, total_steps):
@@ -546,59 +664,11 @@ def _resolve_batch_max_sequence_length(config, rng=None):
     return selected_length
 
 
-def _batch_iterator(dataset, *, batch_size, epochs, max_steps=None):
-    """把任意可迭代 dataset 组织为按样本数计的 batch 迭代器。"""
-    max_steps = None if max_steps is None else int(max_steps)
-    if max_steps is not None and max_steps <= 0:
-        return
-    produced_batches = 0
-    for _epoch in range(max(1, int(epochs))):
-        bucket = []
-        for sample in dataset:
-            bucket.append(sample)
-            if len(bucket) < batch_size:
-                continue
-            yield bucket
-            produced_batches += 1
-            bucket = []
-            if max_steps is not None and produced_batches >= max_steps:
-                return
-        if bucket:
-            yield bucket
-            produced_batches += 1
-            if max_steps is not None and produced_batches >= max_steps:
-                return
-
-
-def _estimate_dataset_batches(dataset, config):
-    """在 dataset 支持 len() 时估算完整训练批次数。"""
-    try:
-        dataset_size = len(dataset)
-    except TypeError:
+def _resolve_remaining_step_budget(total_step_budget, global_step):
+    """根据已完成 global_step 计算续训后的剩余步数上限。"""
+    if total_step_budget is None:
         return None
-    except NotImplementedError:
-        return None
-    if dataset_size <= 0:
-        return None
-    batches_per_epoch = math.ceil(int(dataset_size) / int(config.batch_size))
-    return batches_per_epoch * max(1, int(config.epochs))
-
-
-def _resolve_training_batch_budget(dataset, config):
-    """合并 dataset 大小和 max_steps，得到本次训练最多处理的 batch 数。"""
-    dataset_batches = _estimate_dataset_batches(dataset, config)
-    if config.max_steps is None:
-        return dataset_batches
-    if dataset_batches is None:
-        return int(config.max_steps)
-    return min(int(config.max_steps), int(dataset_batches))
-
-
-def _resolve_remaining_batch_budget(total_batch_budget, global_step):
-    """根据已完成 global_step 计算 resume 后剩余 batch 数。"""
-    if total_batch_budget is None:
-        return None
-    return max(0, int(total_batch_budget) - int(global_step))
+    return max(0, int(total_step_budget) - int(global_step))
 
 
 def _hash_int_tuple(values):
@@ -633,6 +703,7 @@ def _hash_dataset_content(dataset_path):
     return record_count, digest.hexdigest()
 
 
+@lru_cache(maxsize=8192)
 def _progress_path_string(path):
     """把 data_progress 中的路径规范化为项目相对 POSIX 路径。"""
     path = Path(path)
@@ -661,10 +732,18 @@ def _entry_plan_policy(entry_plan):
     }
 
 
-def _build_entry_progress_template(entry_plan, config, *, active):
+def _build_entry_progress_template(
+    entry_plan,
+    config,
+    *,
+    active,
+    source_fingerprint=None,
+):
     """从当前 manifest entry plan 构造数据进度基础字段。"""
     if active:
-        source_record_count, content_hash = _hash_dataset_content(entry_plan.path)
+        if source_fingerprint is None:
+            source_fingerprint = _hash_dataset_content(entry_plan.path)
+        source_record_count, content_hash = source_fingerprint
         if source_record_count != int(entry_plan.source_record_count):
             raise ValueError(
                 f"数据集扫描结果不一致: {entry_plan.path}，"
@@ -691,7 +770,7 @@ def _build_entry_progress_template(entry_plan, config, *, active):
         "completed_epochs": 0,
         "consumed_in_current_epoch": 0,
         "total_consumed_samples": 0,
-        "consumed_ordinals_in_current_epoch": [],
+        "consumed_ordinals_in_current_epoch": set(),
     }
 
 
@@ -710,6 +789,67 @@ def _previous_progress_entries(progress):
         if isinstance(entry_key, str) and entry_key:
             result[entry_key] = entry
     return result
+
+
+def _recover_zero_weight_resume_progress(template, previous_entry):
+    """定向修复旧暂停账本归零的采样计划，避免凭空解释部分样本游标。
+
+    旧实现暂停数据集时会把源指纹与计划规模覆盖为零，但保留训练计数。
+    只有已完成整轮、恢复全量 weight=1 且样本规模一致时，才有足够信息
+    重建每轮样本规模。历史源内容指纹已经丢失，必须明确告知无法回溯核验。
+    """
+    if not previous_entry:
+        return previous_entry
+    previous_policy = previous_entry.get("plan_policy")
+    if not (
+        not previous_entry.get("active", True)
+        and isinstance(previous_policy, dict)
+        and float(previous_policy.get("weight", -1)) == 0.0
+        and int(previous_policy.get("selected_count", -1)) == 0
+        and int(previous_entry.get("planned_sample_count_per_epoch", -1)) == 0
+        and int(previous_entry.get("total_consumed_samples", 0) or 0) > 0
+    ):
+        return previous_entry
+
+    policy = template["plan_policy"]
+    completed_epochs = int(previous_entry.get("completed_epochs", 0) or 0)
+    raw_ordinals = previous_entry.get("consumed_ordinals_in_current_epoch", [])
+    consumed_ordinals = {int(value) for value in raw_ordinals}
+    consumed_current = int(previous_entry.get("consumed_in_current_epoch", 0) or 0)
+    completed_samples = int(previous_entry["total_consumed_samples"]) - consumed_current
+    selected_count = int(policy["selected_count"])
+    # 已归零的计划无法恢复子集身份；只修复完整全量采样，保留其他保护。
+    safe_to_recover = (
+        completed_epochs > 0
+        and completed_samples == completed_epochs * selected_count
+        and consumed_current == len(consumed_ordinals)
+        and all(0 <= value < selected_count for value in consumed_ordinals)
+        and policy["weight"] == 1.0
+        and policy["sample_limit"] is None
+        and previous_policy.get("sample_limit") is None
+        and policy["repeat_count"] == 1
+        and policy["base_indices_hash"] is None
+        and policy["extra_indices_hash"] == _hash_int_tuple(())
+        and selected_count == int(template["source_record_count"])
+    )
+    if not safe_to_recover:
+        raise ValueError(
+            f"旧暂停账本缺少数据集活跃采样计划: {template['entry_name']}。"
+            "无法安全恢复当前样本游标；请使用暂停前的 checkpoint，"
+            "或在核对数据后重置该数据集进度。"
+        )
+
+    recovered = dict(previous_entry)
+    recovered["plan_policy"] = dict(policy)
+    recovered["planned_sample_count_per_epoch"] = selected_count
+    recovered["source_record_count"] = int(template["source_record_count"])
+    recovered["source_content_hash"] = None
+    print(
+        f"续训修复旧暂停账本: {template['entry_name']}。"
+        "已根据完成轮次恢复全量采样计划；历史源内容指纹已丢失，"
+        "无法核验暂停前的文件内容，本次将重新建立源指纹。"
+    )
+    return recovered
 
 
 def _validate_resume_entry_progress(template, previous_entry):
@@ -751,8 +891,44 @@ class DataProgressTracker:
             return
 
         previous_entries = _previous_progress_entries(previous_progress)
+        entry_plans = tuple(dataset.entry_plans)
+        active_entry_plans = tuple(
+            entry_plan
+            for entry_plan in entry_plans
+            if int(entry_plan.selected_count) > 0
+        )
+        fingerprint_workers = min(
+            max(
+                1,
+                int(config.data_num_workers),
+                int(config.data_reader_num_workers),
+            ),
+            len(active_entry_plans),
+        )
+        source_fingerprints = {}
+        dataset_fingerprints = getattr(dataset, "source_fingerprints", None)
+        if isinstance(dataset_fingerprints, dict):
+            # token cache 数据集已内置轻量指纹，不再对 JSONL 全量哈希。
+            source_fingerprints = dict(dataset_fingerprints)
+        elif fingerprint_workers > 1:
+            # 文件彼此独立，预检阶段可并行读取；结果仍按 entry 顺序消费，异常可重复。
+            with ThreadPoolExecutor(
+                max_workers=fingerprint_workers,
+                thread_name_prefix="lpt-data-fingerprint",
+            ) as executor:
+                fingerprint_results = executor.map(
+                    _hash_dataset_content,
+                    (entry_plan.path for entry_plan in active_entry_plans),
+                )
+                source_fingerprints = {
+                    _entry_progress_key(entry_plan): fingerprint
+                    for entry_plan, fingerprint in zip(
+                        active_entry_plans,
+                        fingerprint_results,
+                    )
+                }
         current_keys = set()
-        for entry_plan in dataset.entry_plans:
+        for entry_plan in entry_plans:
             entry_key = _entry_progress_key(entry_plan)
             if entry_key in current_keys:
                 raise ValueError(
@@ -760,26 +936,45 @@ class DataProgressTracker:
                 )
             current_keys.add(entry_key)
             active = int(entry_plan.selected_count) > 0
-            template = _build_entry_progress_template(entry_plan, config, active=active)
+            template = _build_entry_progress_template(
+                entry_plan,
+                config,
+                active=active,
+                source_fingerprint=source_fingerprints.get(entry_key),
+            )
             previous_entry = previous_entries.get(entry_key)
+            if (
+                getattr(dataset, "uses_token_cache", False)
+                and previous_entry is not None
+                and isinstance(previous_entry.get("source_content_hash"), str)
+                and previous_entry["source_content_hash"] != template["source_content_hash"]
+            ):
+                # 旧进度记录的是 JSONL 内容哈希；cache 后端指纹不同，但源文件
+                # 一致性已由 cache manifest 的 stat+头尾采样校验保证。沿用旧哈希
+                # 可以避免续训误报“数据集内容被修改”。
+                template["source_content_hash"] = previous_entry["source_content_hash"]
             if not active:
                 inactive = dict(template)
                 if previous_entry:
-                    for key in (
-                        "completed_epochs",
-                        "consumed_in_current_epoch",
-                        "total_consumed_samples",
-                        "consumed_ordinals_in_current_epoch",
-                    ):
-                        if key in previous_entry:
-                            inactive[key] = previous_entry[key]
+                    # 暂停只改变当前启用状态，必须保存最后活跃计划和源指纹。
+                    # ordinal 指向该计划的样本实例；覆盖为零计划会让恢复时
+                    # 无法判断游标属于哪个采样方案，也会丢失文件内容保护。
+                    inactive = dict(previous_entry)
+                    for key in ("entry_index", "entry_name", "path", "weight", "sample_limit"):
+                        inactive[key] = template[key]
+                    inactive["target_total_epochs"] = self.target_total_epochs
+                    inactive["target_total_samples"] = (
+                        int(inactive.get("planned_sample_count_per_epoch", 0))
+                        * self.target_total_epochs
+                    )
                 inactive["active"] = False
                 inactive["skip_reason"] = "weight_zero_or_empty"
                 self.inactive_entries[entry_key] = inactive
                 continue
 
+            previous_entry = _recover_zero_weight_resume_progress(template, previous_entry)
             _validate_resume_entry_progress(template, previous_entry)
-            consumed_ordinals = []
+            consumed_ordinals = set()
             completed_epochs = 0
             if previous_entry:
                 completed_epochs = min(
@@ -790,13 +985,11 @@ class DataProgressTracker:
                     raw_ordinals = previous_entry.get("consumed_ordinals_in_current_epoch", [])
                     if not isinstance(raw_ordinals, list):
                         raw_ordinals = []
-                    consumed_ordinals = sorted(
-                        {
-                            int(value)
-                            for value in raw_ordinals
-                            if 0 <= int(value) < int(template["planned_sample_count_per_epoch"])
-                        }
-                    )
+                    consumed_ordinals = {
+                        int(value)
+                        for value in raw_ordinals
+                        if 0 <= int(value) < int(template["planned_sample_count_per_epoch"])
+                    }
             template["completed_epochs"] = completed_epochs
             template["consumed_ordinals_in_current_epoch"] = consumed_ordinals
             template["consumed_in_current_epoch"] = len(consumed_ordinals)
@@ -845,7 +1038,7 @@ class DataProgressTracker:
             return False
         if epoch_index > completed_epochs:
             return True
-        consumed = set(entry.get("consumed_ordinals_in_current_epoch", []))
+        consumed = entry.get("consumed_ordinals_in_current_epoch", set())
         return int(meta.get("sample_ordinal", -1)) not in consumed
 
     def update_after_batch(self, samples):
@@ -863,15 +1056,14 @@ class DataProgressTracker:
             epoch_index = int(meta.get("epoch_index", 0))
             while int(entry.get("completed_epochs", 0)) < epoch_index:
                 entry["completed_epochs"] = int(entry.get("completed_epochs", 0)) + 1
-                entry["consumed_ordinals_in_current_epoch"] = []
+                entry["consumed_ordinals_in_current_epoch"] = set()
             if int(entry.get("completed_epochs", 0)) != epoch_index:
                 continue
             ordinal = int(meta.get("sample_ordinal", -1))
             if ordinal < 0:
                 continue
-            consumed = set(entry.get("consumed_ordinals_in_current_epoch", []))
+            consumed = entry.setdefault("consumed_ordinals_in_current_epoch", set())
             consumed.add(ordinal)
-            entry["consumed_ordinals_in_current_epoch"] = sorted(consumed)
             touched.add(meta.get("entry_key"))
 
         for entry_key in touched:
@@ -883,7 +1075,7 @@ class DataProgressTracker:
                     self.target_total_epochs,
                     int(entry.get("completed_epochs", 0)) + 1,
                 )
-                entry["consumed_ordinals_in_current_epoch"] = []
+                entry["consumed_ordinals_in_current_epoch"] = set()
                 consumed_count = 0
             entry["consumed_in_current_epoch"] = consumed_count
             entry["total_consumed_samples"] = (
@@ -898,13 +1090,6 @@ class DataProgressTracker:
             consumed = int(entry.get("total_consumed_samples", 0))
             remaining += max(0, target_total - consumed)
         return remaining
-
-    def remaining_batches(self, batch_size):
-        """按当前 batch size 估算剩余 batch 数。"""
-        remaining = self.remaining_samples()
-        if remaining <= 0:
-            return 0
-        return math.ceil(remaining / int(batch_size))
 
     def summary(self):
         """生成写入 trainer_state 的数据进度摘要。"""
@@ -938,13 +1123,16 @@ class DataProgressTracker:
         entries = []
         for entry in sorted(self.entries.values(), key=lambda value: value["entry_key"]):
             normalized = dict(entry)
-            normalized["consumed_ordinals_in_current_epoch"] = list(
+            normalized["consumed_ordinals_in_current_epoch"] = sorted(
                 normalized.get("consumed_ordinals_in_current_epoch", [])
             )
             entries.append(normalized)
         for entry in sorted(self.inactive_entries.values(), key=lambda value: value.get("entry_key", "")):
             normalized = dict(entry)
             normalized["active"] = False
+            normalized["consumed_ordinals_in_current_epoch"] = sorted(
+                normalized.get("consumed_ordinals_in_current_epoch", [])
+            )
             entries.append(normalized)
         return {
             "schema_version": DATA_PROGRESS_SCHEMA_VERSION,
@@ -955,7 +1143,7 @@ class DataProgressTracker:
             "samples_seen": int(samples_seen),
             "tokens_seen": int(tokens_seen),
             "target_total_epochs": self.target_total_epochs,
-            "batch_size": int(config.batch_size),
+            "batch_token_budget": _resolve_dynamic_batch_token_budget(config),
             "seed": int(config.seed),
             "manifest_path": None if self.manifest_path is None else _progress_path_string(self.manifest_path),
             "source_manifest": None if config.source_manifest is None else _progress_path_string(config.source_manifest),
@@ -966,52 +1154,206 @@ class DataProgressTracker:
         }
 
 
-def _build_progress_batch_iterator(dataset, *, batch_size, epochs, max_steps=None, progress_tracker=None):
-    """按数据进度过滤已训练样本，再组织为 batch。"""
+def _resolve_dynamic_batch_token_budget(config):
+    """返回动态组批的 token 预算，与实际训练截断上限使用同一配置来源。"""
+    budget = int(config.max_sequence_length or GlobalConfig.train_max_sequence_length)
+    if budget < 2:
+        raise ValueError("动态组批要求训练最大序列长度至少为 2。")
+    return budget
+
+
+def _iter_dynamic_progress_batches(
+    dataset, *, epochs, progress_tracker, epoch_indices, reader_pool,
+    length_bucket_window, max_sequence_length, tokenizer, thinking_mode,
+    pad_to_multiple_of, length_records_only,
+):
+    """按真实长度流式组批，保留 epoch 边界和原样本进度身份。
+
+    多样本批限制为 ``样本数 × 对齐后的最长长度 <= token 预算``。
+    即使随后开启 packing，该约束也保守覆盖装箱后的 padding 容量。
+    排序窗口只限制预读内存，批可以跨窗口继续累积，因此没有样本数上限。
+    """
+    budget = int(max_sequence_length)
+    if budget < 2:
+        raise ValueError("动态组批要求训练最大序列长度至少为 2。")
+    alignment = max(1, int(pad_to_multiple_of or 1))
+    selected_epochs = range(max(1, int(epochs))) if epoch_indices is None else epoch_indices
+
+    def prepare_sample(sample):
+        """缓存路径直接读精确长度；在线 chat 分词一次并交给 collator 复用。"""
+        cached_length = sample.get(PRE_TOKENIZED_TOKEN_LENGTH)
+        if cached_length is not None:
+            return sample, min(budget, int(cached_length))
+        if tokenizer is None:
+            raise ValueError("动态组批的非缓存样本需要提供 tokenizer。")
+        encoded = encode_training_sample(sample, tokenizer, max_length=budget, thinking_mode=thinking_mode)
+        if sample.get("type") == "chat":
+            # 保留原 messages 和来源信息，thinking 审计和断点进度继续读取原字段。
+            sample = dict(sample)
+            sample.update({
+                PRE_TOKENIZED_CHAT_INPUT_IDS: encoded.input_ids,
+                PRE_TOKENIZED_CHAT_LABELS: encoded.labels,
+                PRE_TOKENIZED_CHAT_THINKING_MODE_IDS: encoded.thinking_mode_ids,
+                PRE_TOKENIZED_CHAT_TARGET_CHANNEL_IDS: encoded.target_channel_ids,
+            })
+        return sample, encoded.length
+
+    for epoch_index in selected_epochs:
+        if length_records_only:
+            source = dataset.iter_length_records_for_epoch(int(epoch_index))
+        elif hasattr(dataset, "iter_records_for_epoch"):
+            source = dataset.iter_records_for_epoch(int(epoch_index), reader_pool=reader_pool)
+        else:
+            source = iter(dataset)
+        bucket = []
+        bucket_max_length = 0
+        window = []
+
+        def iter_prepared_samples():
+            """可选窗口排序与训练、计步共用，保证两次重放得到相同批边界。"""
+            for sample in source:
+                sample = dict(sample)
+                sample[TRAINING_EPOCH_RECORD_KEY] = int(epoch_index)
+                if progress_tracker is not None and progress_tracker.enabled:
+                    sample = progress_tracker.attach_epoch(sample, epoch_index)
+                    if not progress_tracker.should_train(sample):
+                        continue
+                prepared = prepare_sample(sample)
+                if length_bucket_window <= 0:
+                    yield prepared
+                    continue
+                window.append(prepared)
+                if len(window) >= int(length_bucket_window):
+                    yield from sorted(window, key=lambda item: item[1])
+                    window.clear()
+            yield from sorted(window, key=lambda item: item[1])
+
+        for sample, length in iter_prepared_samples():
+            if length < 2:
+                raise ValueError("动态组批样本在截断后不足 2 个 token。")
+            aligned_length = math.ceil(length / alignment) * alignment
+            projected_max = max(bucket_max_length, aligned_length)
+            if bucket and (len(bucket) + 1) * projected_max > budget:
+                yield bucket
+                bucket = []
+                bucket_max_length = 0
+            bucket.append(sample)
+            bucket_max_length = max(bucket_max_length, aligned_length)
+        if bucket:
+            # 单样本始终可训练；它已经截断到训练窗口，原始 token 长度不会超预算。
+            yield bucket
+
+
+def _build_progress_batch_iterator(
+    dataset,
+    *,
+    epochs,
+    max_steps=None,
+    progress_tracker=None,
+    epoch_indices=None,
+    reader_pool=None,
+    length_bucket_window=0,
+    max_sequence_length=None,
+    tokenizer=None,
+    thinking_mode=THINKING_MODE_OFF,
+    pad_to_multiple_of=None,
+    length_records_only=False,
+):
+    """按进度过滤样本，并在有界窗口内按长度排序后组织 batch。"""
     max_steps = None if max_steps is None else int(max_steps)
     if max_steps is not None and max_steps <= 0:
         return
-    produced_batches = 0
-    for epoch_index in range(max(1, int(epochs))):
-        bucket = []
-        if progress_tracker is not None and progress_tracker.enabled and hasattr(dataset, "iter_records_for_epoch"):
-            sample_iterator = dataset.iter_records_for_epoch(epoch_index)
-        else:
-            sample_iterator = iter(dataset)
-        for sample in sample_iterator:
-            if progress_tracker is not None and progress_tracker.enabled:
-                sample = progress_tracker.attach_epoch(sample, epoch_index)
-                if not progress_tracker.should_train(sample):
-                    continue
-            bucket.append(sample)
-            if len(bucket) < batch_size:
-                continue
-            yield bucket
-            produced_batches += 1
-            bucket = []
-            if max_steps is not None and produced_batches >= max_steps:
-                return
-        if bucket:
-            yield bucket
-            produced_batches += 1
-            if max_steps is not None and produced_batches >= max_steps:
-                return
+    batches = _iter_dynamic_progress_batches(
+        dataset, epochs=epochs, progress_tracker=progress_tracker,
+        epoch_indices=epoch_indices, reader_pool=reader_pool,
+        length_bucket_window=length_bucket_window,
+        max_sequence_length=max_sequence_length or GlobalConfig.train_max_sequence_length,
+        tokenizer=tokenizer, thinking_mode=thinking_mode,
+        pad_to_multiple_of=pad_to_multiple_of, length_records_only=length_records_only,
+    )
+    for index, batch in enumerate(batches):
+        yield batch
+        if max_steps is not None and index + 1 >= max_steps:
+            return
 
 
-def _resolve_progress_training_budget(dataset, config, progress_tracker, global_step):
+def _resolve_progress_training_budget(
+    dataset,
+    config,
+    progress_tracker,
+    global_step,
+    *,
+    data_worker_count=0,
+    tokenizer=None,
+    device=None,
+):
     """结合数据进度和 max_steps 计算本次续训剩余 batch 数。"""
-    if progress_tracker is not None and progress_tracker.enabled:
-        remaining_batches = progress_tracker.remaining_batches(config.batch_size)
-        if config.max_steps is not None:
-            remaining_batches = min(
-                remaining_batches,
-                _resolve_remaining_batch_budget(int(config.max_steps), global_step),
-            )
-        total_budget = int(global_step) + int(remaining_batches)
-        return total_budget, remaining_batches
+    step_limit = (
+        None if config.max_steps is None
+            else _resolve_remaining_step_budget(int(config.max_steps), global_step)
+    )
+    if progress_tracker is not None and progress_tracker.enabled and progress_tracker.remaining_samples() == 0:
+        remaining_batches = 0
+    elif hasattr(dataset, "iter_length_records_for_epoch"):
+        # 只重放长度索引和 ordinal，不解析正文，不读取 token 数组内容。
+        remaining_batches = sum(1 for _ in _build_progress_batch_iterator(
+            dataset, epochs=config.epochs, max_steps=step_limit,
+            progress_tracker=progress_tracker,
+            length_bucket_window=config.data_length_bucket_window,
+            max_sequence_length=_resolve_dynamic_batch_token_budget(config),
+            length_records_only=True,
+            pad_to_multiple_of=(
+                GlobalConfig.pad_to_multiple_of
+                if device is not None and device.type == "cuda"
+                else None
+            ),
+        ))
+    else:
+        # 非缓存流没有廉价的精确长度索引，显式 max_steps 仍作为总步数上限。
+        remaining_batches = step_limit
+    return (
+        None if remaining_batches is None else int(global_step) + remaining_batches,
+        remaining_batches,
+    )
 
-    total_budget = _resolve_training_batch_budget(dataset, config)
-    return total_budget, _resolve_remaining_batch_budget(total_budget, global_step)
+
+def _resolve_optimizer_step_budget(optimizer_step, remaining_steps, gradient_accumulation_steps):
+    """把剩余 microbatch 数换算成 scheduler 使用的 optimizer step 总预算。"""
+    if remaining_steps is None:
+        return None
+    remaining_optimizer_steps = math.ceil(
+        max(0, int(remaining_steps)) / int(gradient_accumulation_steps)
+    )
+    return int(optimizer_step) + remaining_optimizer_steps
+
+
+def _stable_training_batch_seed(samples, base_seed):
+    """根据稳定样本身份派生 batch RNG seed，保证 resume 后窗口采样一致。"""
+    digest = hashlib.sha256()
+    digest.update(str(int(base_seed)).encode("ascii"))
+    digest.update(b"\n")
+    for sample in samples:
+        progress_metadata = (
+            sample.get(DATA_PROGRESS_RECORD_KEY)
+            if isinstance(sample, dict)
+            else None
+        )
+        if isinstance(progress_metadata, dict):
+            identity = (
+                progress_metadata.get("entry_key"),
+                int(progress_metadata.get("sample_ordinal", -1)),
+                int(progress_metadata.get("epoch_index", 0)),
+            )
+        else:
+            identity = (
+                sample.get("id", "<unknown>") if isinstance(sample, dict) else repr(sample),
+                int(sample.get(TRAINING_EPOCH_RECORD_KEY, 0)) if isinstance(sample, dict) else 0,
+            )
+        digest.update(
+            json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+        digest.update(b"\n")
+    return int.from_bytes(digest.digest()[:8], byteorder="big", signed=False)
 
 
 def _build_batch_tensors(samples, tokenizer, config, rng=None):
@@ -1034,8 +1376,9 @@ def _build_batch_tensors(samples, tokenizer, config, rng=None):
             max_length=max_length,
             thinking_mode=config.thinking_mode,
             include_thinking_tensors=True,
+            packing_strategy=config.data_packing_strategy,
         )
-        return {
+        batch = {
             "input_ids": input_ids,
             "labels": labels,
             "attention_mask": attention_mask,
@@ -1045,61 +1388,448 @@ def _build_batch_tensors(samples, tokenizer, config, rng=None):
             "segment_ids": segment_ids,
             "sample_count": sample_count,
         }
-    input_ids, labels, attention_mask, thinking_mode_ids, target_channel_ids = build_training_batch(
-        samples,
-        tokenizer,
-        max_length=max_length,
-        thinking_mode=config.thinking_mode,
-        include_thinking_tensors=True,
-    )
+    else:
+        input_ids, labels, attention_mask, thinking_mode_ids, target_channel_ids = build_training_batch(
+            samples,
+            tokenizer,
+            max_length=max_length,
+            thinking_mode=config.thinking_mode,
+            include_thinking_tensors=True,
+        )
+        batch = {
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": attention_mask,
+            "thinking_mode_ids": thinking_mode_ids,
+            "target_channel_ids": target_channel_ids,
+            "position_ids": None,
+            "segment_ids": None,
+            "sample_count": len(samples),
+        }
+    # 这两个标量在 CPU worker 中计算，避免训练主循环每 batch 强制同步 CUDA。
+    batch["token_count"] = int(batch["attention_mask"].sum().item())
+    batch["valid_target_count"] = int((batch["labels"][:, 1:] != -100).sum().item())
+    if batch["position_ids"] is None:
+        batch["rope_sequence_length"] = int(
+            batch["attention_mask"].sum(dim=1).max().item()
+        )
+    else:
+        batch["rope_sequence_length"] = int(batch["position_ids"].max().item()) + 1
+    return batch
+
+
+class _TrainingBatchCollator:
+    """在 spawn worker 内完成一个全局 batch 的分词、packing 和张量化。"""
+
+    def __init__(self, tokenizer, config, *, target_device_type):
+        self.tokenizer = tokenizer
+        self.config = config
+        self.target_device_type = str(target_device_type)
+        self.chat_template_version = GlobalConfig.chat_template_version
+        self.pad_to_multiple_of = GlobalConfig.pad_to_multiple_of
+        self.train_max_sequence_length = GlobalConfig.train_max_sequence_length
+
+    def __call__(self, samples):
+        # spawn worker 会重新导入模块；显式恢复影响 batch 形状和模板的运行配置。
+        GlobalConfig.device = torch.device(self.target_device_type)
+        GlobalConfig.chat_template_version = self.chat_template_version
+        GlobalConfig.pad_to_multiple_of = self.pad_to_multiple_of
+        GlobalConfig.train_max_sequence_length = self.train_max_sequence_length
+        batch = _build_batch_tensors(
+            samples,
+            self.tokenizer,
+            self.config,
+            rng=random.Random(
+                _stable_training_batch_seed(samples, self.config.seed)
+            ),
+        )
+        progress_samples = []
+        for sample in samples:
+            progress_metadata = sample.get(DATA_PROGRESS_RECORD_KEY)
+            if isinstance(progress_metadata, dict):
+                progress_samples.append(
+                    {DATA_PROGRESS_RECORD_KEY: dict(progress_metadata)}
+                )
+        batch["_progress_samples"] = tuple(progress_samples)
+        thinking_delta = _new_thinking_training_summary(self.config)
+        _update_thinking_training_summary(
+            thinking_delta,
+            samples,
+            thinking_mode=self.config.thinking_mode,
+        )
+        batch["_thinking_summary_delta"] = {
+                key: int(thinking_delta[key])
+                for key in THINKING_SUMMARY_COUNTER_KEYS
+        }
+        return batch
+
+
+def _pin_training_batch(batch):
+    """在主进程锁定最终 batch 张量，供 CUDA copy stream 异步搬运。"""
     return {
-        "input_ids": input_ids,
-        "labels": labels,
-        "attention_mask": attention_mask,
-        "thinking_mode_ids": thinking_mode_ids,
-        "target_channel_ids": target_channel_ids,
-        "position_ids": None,
-        "segment_ids": None,
-        "sample_count": len(samples),
+        key: value.pin_memory() if isinstance(value, torch.Tensor) else value
+        for key, value in batch.items()
     }
 
 
-def _move_batch(batch, device):
+_TRAINING_BATCH_COLLATOR = None
+
+
+def _initialize_training_data_worker(tokenizer, config, target_device_type):
+    """初始化 spawn 批处理进程，并限制每个进程只占一个 torch 计算线程。"""
+    global _TRAINING_BATCH_COLLATOR
+    torch.set_num_threads(1)
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    _TRAINING_BATCH_COLLATOR = _TrainingBatchCollator(
+        tokenizer,
+        config,
+        target_device_type=target_device_type,
+    )
+
+
+def _build_training_batch_in_worker(samples):
+    """执行已在 initializer 中缓存的 worker collator。"""
+    if _TRAINING_BATCH_COLLATOR is None:
+        raise RuntimeError("训练批处理 worker 尚未初始化。")
+    return _TRAINING_BATCH_COLLATOR(samples)
+
+
+def _resolve_data_worker_count(dataset, config, progress_tracker):
+    """决定批处理 worker 数；单个大 JSONL 也可以把不同 batch 分发到多核。"""
+    requested_workers = max(0, int(config.data_num_workers))
+    if requested_workers == 0:
+        return 0
+    if getattr(dataset, "uses_token_cache", False):
+        # mmap numpy 样本跨 spawn 进程会产生 IPC 序列化副本，因此 cache
+        # 后端改用同进程线程池。numpy/torch 张量化会释放 GIL，既能与主训练
+        # 线程重叠，又不会为每批复制整份 token 数组。
+        available_cpus = max(1, int(os.cpu_count() or 1))
+        return min(requested_workers, available_cpus)
+    if progress_tracker is None or not progress_tracker.enabled:
+        # 普通可迭代对象未必支持跨进程稳定分片，保留单进程兼容语义。
+        return 0
+    available_cpus = max(1, int(os.cpu_count() or 1))
+    return min(requested_workers, available_cpus)
+
+
+def _resolve_data_reader_worker_count(dataset, config, progress_tracker, batch_worker_count):
+    """决定原始 JSONL 解析 worker 数，并为 batch worker 留出 CPU。"""
+    if getattr(dataset, "uses_token_cache", False):
+        # token cache 数据集从 mmap 读取，不需要 JSONL reader 进程池。
+        return 0
+    requested_workers = max(0, int(config.data_reader_num_workers))
+    if requested_workers == 0:
+        return 0
+    if progress_tracker is None or not progress_tracker.enabled:
+        # 普通 list/自定义 IterableDataset 没有稳定的 manifest 文件边界，
+        # 不把它们强行送入 JSONL reader。
+        return 0
+    entry_plans = getattr(dataset, "entry_plans", ())
+    active_paths = {
+        str(Path(entry_plan.path).resolve())
+        for entry_plan in entry_plans
+        if int(getattr(entry_plan, "selected_count", 0)) > 0
+    }
+    if not active_paths:
+        return 0
+    available_cpus = max(1, int(os.cpu_count() or 1))
+    spare_cpus = max(1, available_cpus - max(0, int(batch_worker_count)))
+    return min(requested_workers, spare_cpus, len(active_paths) if len(active_paths) > 1 else requested_workers)
+
+
+def _build_jsonl_reader_pool(dataset, config, progress_tracker, batch_worker_count):
+    """为流式 manifest 建立一个跨 epoch 复用的 JSONL reader pool。"""
+    if getattr(dataset, "uses_token_cache", False):
+        return None, 0
+    reader_worker_count = _resolve_data_reader_worker_count(
+        dataset,
+        config,
+        progress_tracker,
+        batch_worker_count,
+    )
+    if reader_worker_count <= 0:
+        return None, 0
+    entry_plans = getattr(dataset, "entry_plans", ())
+    paths = tuple(
+        dict.fromkeys(
+            Path(entry_plan.path)
+            for entry_plan in entry_plans
+            if int(getattr(entry_plan, "selected_count", 0)) > 0
+        )
+    )
+    if not paths:
+        return None, 0
+    pool = JSONLReaderPool(
+        paths,
+        expected_types=getattr(dataset, "expected_types", None),
+        num_workers=reader_worker_count,
+        chunk_bytes=config.data_reader_chunk_bytes,
+        max_in_flight=max(
+            reader_worker_count,
+            reader_worker_count * max(1, int(config.data_prefetch_factor)),
+        ),
+    )
+    return pool, reader_worker_count
+
+
+def _iter_parallel_training_batches(
+    dataset,
+    tokenizer,
+    config,
+    progress_tracker,
+    device,
+    *,
+    worker_count,
+):
+    """按稳定全局 batch 边界，有序并发执行分词、packing 与张量化。"""
+    worker_count = max(0, int(worker_count))
+    uses_token_cache = bool(getattr(dataset, "uses_token_cache", False))
+    pin_memory = bool(config.data_pin_memory and device.type == "cuda")
+    reader_pool, _reader_worker_count = _build_jsonl_reader_pool(
+        dataset,
+        config,
+        progress_tracker,
+        worker_count,
+    )
+
+    def build_source_batches(epoch_indices=None):
+        return _build_progress_batch_iterator(
+            dataset,
+            epochs=config.epochs,
+            progress_tracker=progress_tracker,
+            epoch_indices=epoch_indices,
+            reader_pool=reader_pool,
+            length_bucket_window=config.data_length_bucket_window,
+            max_sequence_length=config.max_sequence_length,
+            tokenizer=tokenizer,
+            thinking_mode=config.thinking_mode,
+            pad_to_multiple_of=GlobalConfig.pad_to_multiple_of if device.type == "cuda" else None,
+        )
+
+    collator = _TrainingBatchCollator(
+        tokenizer,
+        config,
+        target_device_type=device.type,
+    )
+
+    def process_source_batches(source_batches):
+        """把 reader 产出的结构化 batch 送入分词/packing worker。"""
+        if uses_token_cache:
+            # cache 样本已预编码且来自 mmap；线程池避免 Windows spawn 与
+            # numpy IPC 副本，同时保留有界预取和稳定的 batch 返回顺序。
+            executor = ThreadPoolExecutor(
+                max_workers=worker_count,
+                thread_name_prefix="lpt-token-cache-batch",
+            )
+            build_batch = collator
+        else:
+            executor = ProcessPoolExecutor(
+                max_workers=worker_count,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=_initialize_training_data_worker,
+                initargs=(tokenizer, config, device.type),
+            )
+            build_batch = _build_training_batch_in_worker
+        pending = deque()
+        source_exhausted = False
+
+        def submit_next():
+            nonlocal source_exhausted
+            if source_exhausted:
+                return False
+            try:
+                samples = next(source_batches)
+            except StopIteration:
+                source_exhausted = True
+                return False
+            pending.append(
+                executor.submit(build_batch, tuple(samples))
+            )
+            return True
+
+        try:
+            for _ in range(prefetch_batches):
+                if not submit_next():
+                    break
+            while pending:
+                future = pending.popleft()
+                batch = future.result()
+                submit_next()
+                yield _pin_training_batch(batch) if pin_memory else batch
+        finally:
+            for future in pending:
+                future.cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
+
+    try:
+        if worker_count == 0:
+            for samples in build_source_batches():
+                batch = collator(tuple(samples))
+                yield _pin_training_batch(batch) if pin_memory else batch
+            return
+
+        prefetch_batches = max(
+            worker_count,
+            worker_count * int(config.data_prefetch_factor),
+        )
+        if config.data_persistent_workers:
+            yield from process_source_batches(build_source_batches())
+            return
+        for epoch_index in range(max(1, int(config.epochs))):
+            yield from process_source_batches(
+                build_source_batches(epoch_indices=(epoch_index,))
+            )
+    finally:
+        if reader_pool is not None:
+            reader_pool.close()
+
+
+def _build_data_pipeline_runtime_metadata(
+    config,
+    worker_count,
+    pin_memory,
+    reader_worker_count=0,
+    worker_backend=None,
+):
+    """记录请求配置与实际生效的数据流水线参数，便于 checkpoint 审计。"""
+    worker_count = max(0, int(worker_count))
+    worker_backend = None if worker_count == 0 else str(worker_backend or "process")
+    worker_location = {
+        "thread": "batch_thread",
+        "process": "batch_worker",
+    }.get(worker_backend, "batch_worker" if worker_count > 0 else "training_main")
+    return {
+        "requested_num_workers": int(config.data_num_workers),
+        "effective_num_workers": worker_count,
+        "requested_reader_num_workers": int(config.data_reader_num_workers),
+        "effective_reader_num_workers": int(reader_worker_count),
+        "requested_reader_chunk_bytes": int(config.data_reader_chunk_bytes),
+        "effective_reader_chunk_bytes": (
+            int(config.data_reader_chunk_bytes) if reader_worker_count > 0 else 0
+        ),
+        "requested_prefetch_factor": int(config.data_prefetch_factor),
+        "effective_prefetch_factor": (
+            int(config.data_prefetch_factor) if worker_count > 0 else 0
+        ),
+        "requested_persistent_workers": bool(config.data_persistent_workers),
+        "effective_persistent_workers": bool(
+            config.data_persistent_workers and worker_count > 0
+        ),
+        "requested_pin_memory": bool(config.data_pin_memory),
+        "effective_pin_memory": bool(pin_memory),
+        "worker_backend": worker_backend,
+        "multiprocessing_context": (
+            "spawn" if worker_count > 0 and worker_backend == "process" else None
+        ),
+        "data_read_location": "reader_worker" if reader_worker_count > 0 else "training_main",
+        "sample_encoding_location": worker_location,
+        "batch_build_location": worker_location,
+        "entry_sharding": None,
+        "async_h2d_prefetch": bool(pin_memory),
+        "length_bucket_window": int(config.data_length_bucket_window),
+        "batch_token_budget": _resolve_dynamic_batch_token_budget(config),
+        "length_bucket_strategy": (
+            "bounded_character_sort" if int(config.data_length_bucket_window) > 0 else "sequential"
+        ),
+        "packing_strategy": str(config.data_packing_strategy),
+        "token_cache_enabled": bool(getattr(config, "token_cache_enabled", False)),
+        "token_cache_dir": (
+            str(config.token_cache_dir)
+            if getattr(config, "token_cache_dir", None) is not None
+            else None
+        ),
+    }
+
+
+def _move_batch(batch, device, *, non_blocking=False):
     """把 batch 内 tensor 移动到目标设备，非 tensor 元数据保持原样。"""
     moved = {}
     for key, value in batch.items():
-        moved[key] = value.to(device) if isinstance(value, torch.Tensor) else value
+        moved[key] = (
+            value.to(device, non_blocking=bool(non_blocking))
+            if isinstance(value, torch.Tensor)
+            else value
+        )
     return moved
 
 
-def _compute_lm_loss(logits, labels, *, chunk_tokens=LM_LOSS_CHUNK_TOKENS):
+def _iter_device_batches(data_iterator, device, *, async_h2d=False):
+    """把 CPU batch 搬到目标设备；CUDA 下提前一批重叠 H2D 与模型计算。"""
+    if device.type != "cuda" or not async_h2d:
+        for cpu_batch in data_iterator:
+            yield _move_batch(cpu_batch, device, non_blocking=False)
+        return
+
+    copy_stream = torch.cuda.Stream(device=device)
+    compute_stream = torch.cuda.current_stream(device=device)
+    source_iterator = iter(data_iterator)
+
+    def preload():
+        try:
+            cpu_batch = next(source_iterator)
+        except StopIteration:
+            return None
+        with torch.cuda.stream(copy_stream):
+            return _move_batch(cpu_batch, device, non_blocking=True)
+
+    prefetched_batch = preload()
+    while prefetched_batch is not None:
+        compute_stream.wait_stream(copy_stream)
+        current_batch = prefetched_batch
+        for value in current_batch.values():
+            if isinstance(value, torch.Tensor):
+                value.record_stream(compute_stream)
+        # wait_stream 只等待此前已提交的 copy；此处提交下一批后可与当前计算重叠。
+        prefetched_batch = preload()
+        yield current_batch
+
+
+def _compute_lm_loss(
+    logits,
+    labels,
+    *,
+    chunk_tokens=LM_LOSS_CHUNK_TOKENS,
+    valid_target_count=None,
+):
     """计算自回归 LM loss，并分块降低大 vocab 下的峰值显存。"""
     shift_logits = logits[:, :-1, :]
     shift_labels = labels[:, 1:]
-    valid_target_count = int((shift_labels != -100).sum().item())
+    if valid_target_count is None:
+        valid_target_count = int((shift_labels != -100).sum().item())
+    else:
+        valid_target_count = int(valid_target_count)
     if valid_target_count == 0:
         return None, valid_target_count
 
     chunk_tokens = max(1, int(chunk_tokens))
+    # 展平为 (总token数, vocab) 后只保留一层分块循环：既能控制峰值显存
+    # （chunk_tokens x vocab 的 fp32 临时张量），又比“按 batch 行再按 chunk”
+    # 的双层 Python 循环少一层调度，缓解训练主进程 CPU 单核瓶颈。
+    flat_logits = shift_logits.reshape(-1, shift_logits.size(-1))
+    flat_labels = shift_labels.reshape(-1)
     loss_sum = logits.new_zeros((), dtype=torch.float32)
-    for batch_index in range(shift_logits.size(0)):
-        batch_logits = shift_logits[batch_index]
-        batch_labels = shift_labels[batch_index]
-        for start in range(0, batch_logits.size(0), chunk_tokens):
-            end = min(start + chunk_tokens, batch_logits.size(0))
-            chunk_labels = batch_labels[start:end]
-            chunk_valid_count = int((chunk_labels != -100).sum().item())
-            if chunk_valid_count == 0:
-                continue
-            # reduction="sum" 后统一除以有效 target 数，避免不同 chunk 有效 token 数不等导致加权偏差。
-            chunk_logits = batch_logits[start:end]
-            chunk_loss = F.cross_entropy(
-                chunk_logits.float(),
-                chunk_labels,
-                ignore_index=-100,
-                reduction="sum",
-            )
-            loss_sum = loss_sum + chunk_loss
+    for start in range(0, flat_logits.size(0), chunk_tokens):
+        end = min(start + chunk_tokens, flat_logits.size(0))
+        chunk_labels = flat_labels[start:end]
+        # reduction="sum" 后统一除以有效 target 数，避免不同 chunk 有效 token 数不等导致加权偏差。
+        chunk_logits = flat_logits[start:end]
+        # CUDA 下 autocast 的 bf16/fp16 logits 直接交给 cross_entropy（内部按
+        # fp32 计算），避免每个 chunk 额外创建 fp32 拷贝：峰值显存减半、kernel
+        # 数减半，显存受限场景下的训练吞吐明显改善。CPU/fp32 路径保持 float()
+        # 兼容（对 fp32 是 no-op）。
+        chunk_input = (
+            chunk_logits
+            if chunk_logits.is_cuda
+            and chunk_logits.dtype in (torch.float16, torch.bfloat16)
+            else chunk_logits.float()
+        )
+        chunk_loss = F.cross_entropy(
+            chunk_input,
+            chunk_labels,
+            ignore_index=-100,
+            reduction="sum",
+        )
+        loss_sum = loss_sum + chunk_loss
     return loss_sum / valid_target_count, valid_target_count
 
 
@@ -1115,6 +1845,9 @@ def _forward_batch(model, batch):
         rope_cache_scope="train",
         request_id="train",
         use_kv_cache=False,
+        collect_runtime_state=False,
+        rope_sequence_length=batch["rope_sequence_length"],
+        validate_control_ids=False,
     )
 
 
@@ -1127,14 +1860,42 @@ def _autocast_enabled(device):
 
 
 def _compute_grad_norm(parameters):
-    """手动计算 L2 grad norm，供不裁剪梯度时记录指标。"""
-    total = 0.0
+    """在参数设备上计算 L2 grad norm，避免逐参数回读 CUDA 标量。"""
+    parameter_norms = []
     for parameter in parameters:
         if parameter.grad is None:
             continue
-        grad_norm = parameter.grad.detach().float().norm(2).item()
-        total += grad_norm * grad_norm
-    return math.sqrt(total)
+        parameter_norms.append(parameter.grad.detach().float().norm(2))
+    if not parameter_norms:
+        return None
+    if len(parameter_norms) == 1:
+        return parameter_norms[0]
+    aggregation_device = parameter_norms[0].device
+    return torch.stack(
+        [norm.to(device=aggregation_device) for norm in parameter_norms]
+    ).norm(2)
+
+
+def _scalar_to_float(value):
+    """只在日志或 checkpoint 边界把设备标量转换为 Python 数值。"""
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().cpu())
+    return float(value)
+
+
+def _rescale_partial_accumulated_gradients(parameters, *, completed_steps, target_steps):
+    """把尾部 k/G 累积梯度恢复为按实际 k 个 microbatch 求平均的尺度。"""
+    completed_steps = int(completed_steps)
+    target_steps = int(target_steps)
+    if completed_steps <= 0 or completed_steps >= target_steps:
+        return
+    scale = target_steps / completed_steps
+    with torch.no_grad():
+        for parameter in parameters:
+            if parameter.grad is not None:
+                parameter.grad.mul_(scale)
 
 
 def _reset_cuda_peak_memory_stats(device):
@@ -1167,7 +1928,7 @@ def _evaluate_model(model, tokenizer, eval_dataset, config, device):
     losses = []
     token_count = 0
     max_eval_batches = None if config.eval_max_batches is None else int(config.eval_max_batches)
-    eval_batch_size = int(config.eval_batch_size or config.batch_size)
+    eval_batch_size = int(config.eval_batch_size or 1)
     for batch_index, samples in enumerate(
         _batch_iterator(
             eval_dataset,
@@ -1185,9 +1946,14 @@ def _evaluate_model(model, tokenizer, eval_dataset, config, device):
             enabled=_autocast_enabled(device),
         ):
             logits, _states = _forward_batch(model, batch)
-            loss, valid_targets = _compute_lm_loss(logits, batch["labels"])
+            loss, valid_targets = _compute_lm_loss(
+                logits,
+                batch["labels"],
+                valid_target_count=batch["valid_target_count"],
+                chunk_tokens=config.lm_loss_chunk_tokens,
+            )
         if loss is not None:
-            losses.append(float(loss.detach().cpu()))
+            losses.append(loss.detach())
             token_count += valid_targets
         # eval 不需要保留 logits 或辅助状态；及时释放，避免长样本影响后续短样本显存。
         del logits, _states, loss, batch
@@ -1197,7 +1963,8 @@ def _evaluate_model(model, tokenizer, eval_dataset, config, device):
         model.train()
     if not losses:
         return None
-    eval_loss = sum(losses) / len(losses)
+    # 验证阶段只在汇总时同步一次，避免每个 eval batch 都阻塞主线程。
+    eval_loss = float(torch.stack(losses).mean().cpu())
     return {
         "eval_loss": eval_loss,
         "eval_ppl": math.exp(eval_loss) if eval_loss < 80 else float("inf"),
@@ -1371,6 +2138,12 @@ def _write_tensorboard_metrics(writer, namespace, metric):
 
 def _write_metric_outputs(config, namespace, metric, writer):
     """同时写 JSONL、控制台和 TensorBoard。"""
+    metric = dict(metric)
+    # 同一个 artifact 目录可能被多次启动追加；写入运行身份和墙钟时间后，
+    # 可以区分正常 resume、重复启动和两个训练进程同时争用 GPU 的情况。
+    metric.setdefault("run_id", config.run_id)
+    metric.setdefault("process_id", os.getpid())
+    metric.setdefault("wall_time_unix", round(time(), 4))
     _write_metrics(config.artifact_dir, metric)
     _print_metric_record(namespace, metric)
     _write_tensorboard_metrics(writer, namespace, metric)
@@ -1478,6 +2251,43 @@ def _cleanup_checkpoint_root(path):
         pass
 
 
+def _capture_training_rng_state():
+    """捕获 Python、CPU torch 与当前 CUDA 设备随机状态。"""
+    return {
+        "python": random.getstate(),
+        "torch_cpu": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+    }
+
+
+def _restore_training_rng_state(payload):
+    """恢复 checkpoint 随机状态；CUDA 设备数变化时恢复可对应的前缀设备。"""
+    if not isinstance(payload, dict):
+        return False
+    python_state = payload.get("python")
+    torch_cpu_state = payload.get("torch_cpu")
+    if python_state is not None:
+        random.setstate(python_state)
+    if isinstance(torch_cpu_state, torch.Tensor):
+        torch.set_rng_state(torch_cpu_state.cpu())
+    if torch.cuda.is_available():
+        cuda_states = payload.get("torch_cuda") or ()
+        for device_index, cuda_state in enumerate(
+            tuple(cuda_states)[: torch.cuda.device_count()]
+        ):
+            torch.cuda.set_rng_state(cuda_state.cpu(), device=device_index)
+    return True
+
+
+def _load_training_rng_state(checkpoint_root):
+    """按需加载 RNG 文件，兼容尚未包含该文件的早期 v2 checkpoint。"""
+    rng_path = Path(checkpoint_root) / RNG_STATE_NAME
+    if not rng_path.is_file():
+        return False
+    payload = torch.load(rng_path, map_location="cpu", weights_only=False)
+    return _restore_training_rng_state(payload)
+
+
 def _save_checkpoint(
     model,
     optimizer,
@@ -1519,6 +2329,8 @@ def _save_checkpoint(
         if config.save_scheduler and scheduler is not None:
             atomic_torch_save(scheduler.state_dict(), staging_root / SCHEDULER_CHECKPOINT_NAME)
             file_names.append(SCHEDULER_CHECKPOINT_NAME)
+        atomic_torch_save(_capture_training_rng_state(), staging_root / RNG_STATE_NAME)
+        file_names.append(RNG_STATE_NAME)
         _save_trainer_state(staging_root, trainer_state)
         file_names.append(TRAINER_STATE_NAME)
         if data_progress is not None:
@@ -1660,6 +2472,13 @@ def _update_thinking_training_summary(summary, samples, *, thinking_mode):
         if sample_type != "chat":
             continue
         summary["chat_samples"] += 1
+        cached_summary = sample.get(PRE_TOKENIZED_CHAT_THINKING_SUMMARY)
+        if isinstance(cached_summary, dict):
+            # 预编码缓存不保留完整 messages；直接累计构建时保存的同义统计。
+            for key in THINKING_SUMMARY_COUNTER_KEYS:
+                if key not in {"text_samples", "chat_samples"}:
+                    summary[key] += int(cached_summary.get(key, 0))
+            continue
         for message in sample.get("messages", ()):
             if not isinstance(message, dict) or message.get("role") != "assistant":
                 continue
@@ -1678,6 +2497,13 @@ def _update_thinking_training_summary(summary, samples, *, thinking_mode):
     return summary
 
 
+def _merge_thinking_training_summary(summary, delta):
+    """把 worker 返回的 thinking 计数增量合并到主进程累计值。"""
+    for key in THINKING_SUMMARY_COUNTER_KEYS:
+        summary[key] += int(delta.get(key, 0))
+    return summary
+
+
 def _build_trainer_state(
     config,
     *,
@@ -1691,6 +2517,7 @@ def _build_trainer_state(
     optimizer_group_summary=None,
     data_progress_summary=None,
     thinking_summary=None,
+    data_pipeline_runtime=None,
 ):
     """生成 trainer_state，覆盖续训、报告和 checkpoint metadata 需要的字段。"""
     latest_eval_loss = None
@@ -1719,6 +2546,7 @@ def _build_trainer_state(
         "deterministic_algorithms": bool(config.deterministic_algorithms),
         "save_optimizer": bool(config.save_optimizer),
         "save_scheduler": bool(config.save_scheduler),
+        "rng_state_saved": True,
         "save_inference_weights": bool(config.save_inference_weights),
         "eval_batch_size": config.eval_batch_size,
         "eval_max_batches": None if config.eval_max_batches is None else int(config.eval_max_batches),
@@ -1726,6 +2554,7 @@ def _build_trainer_state(
         "longrope2_training_strategy": _build_longrope2_training_strategy(config),
         "optimizer_group_summary": optimizer_group_summary,
         "data_progress": data_progress_summary,
+        "data_pipeline_runtime": data_pipeline_runtime,
         "thinking": thinking_summary,
         "tokenizer_metadata": dict(config.tokenizer_metadata or {}),
         "training_config": _serialize_training_config(config),
@@ -1761,10 +2590,25 @@ def train(
     device = next(model.parameters()).device
     GlobalConfig.device = device
     model.train()
+
+    # 根据配置启用梯度检查点
+    if config.gradient_checkpointing:
+        model.gradient_checkpointing = True
+        print(f"已启用梯度检查点（Gradient Checkpointing），将节省激活值显存但训练速度降低 10-20%。")
+    else:
+        model.gradient_checkpointing = False
+
     optimizer, optimizer_group_summary = _build_optimizer(
         model,
         learning_rate=config.learning_rate,
         weight_decay=config.weight_decay,
+        optimizer_type=config.optimizer_type,
+    )
+    # 训练期间参数冻结状态不会变化，提前物化一次可训练参数列表，
+    # 避免每个 optimizer step 重新遍历 named_parameters（大模型下这部分
+    # Python 调度是训练主进程 CPU 单核的固定开销）。
+    trainable_parameters = tuple(
+        parameter for _, parameter in _iter_trainable_parameters(model)
     )
     global_step = 0
     optimizer_step = 0
@@ -1796,52 +2640,119 @@ def train(
         config,
         previous_progress=previous_data_progress,
     )
-    training_batch_budget, remaining_steps = _resolve_progress_training_budget(
+    data_worker_count = _resolve_data_worker_count(
+        dataset,
+        config,
+        data_progress_tracker,
+    )
+    data_reader_worker_count = _resolve_data_reader_worker_count(
+        dataset,
+        config,
+        data_progress_tracker,
+        data_worker_count,
+    )
+    _training_batch_budget, remaining_steps = _resolve_progress_training_budget(
         dataset,
         config,
         data_progress_tracker,
         global_step,
+        data_worker_count=data_worker_count,
+        tokenizer=tokenizer,
+        device=device,
+    )
+    optimizer_step_budget = _resolve_optimizer_step_budget(
+        optimizer_step,
+        remaining_steps,
+        config.gradient_accumulation_steps,
     )
     scheduler = _build_scheduler(
         optimizer,
-        total_steps=training_batch_budget,
+        total_steps=optimizer_step_budget,
         warmup_ratio=config.warmup_ratio,
     )
     if resume_checkpoint is not None:
         _load_optimizer_scheduler_state(resume_checkpoint, optimizer, scheduler)
+        _load_training_rng_state(resume_checkpoint)
     tensorboard_writer = _build_tensorboard_writer(config)
-    length_rng = random.Random(int(config.seed) + 7919)
     thinking_summary = _new_thinking_training_summary(config)
 
+    pin_memory = bool(config.data_pin_memory and device.type == "cuda")
+    data_worker_backend = (
+        "thread"
+        if data_worker_count > 0 and getattr(dataset, "uses_token_cache", False)
+        else ("process" if data_worker_count > 0 else None)
+    )
+    data_pipeline_runtime = _build_data_pipeline_runtime_metadata(
+        config,
+        data_worker_count,
+        pin_memory,
+        data_reader_worker_count,
+        data_worker_backend,
+    )
+    print(
+        "训练数据流水线: "
+        f"reader_workers={data_reader_worker_count}, "
+        f"batch_workers={data_worker_count}, "
+        f"batch_worker_backend={data_worker_backend or 'none'}, "
+        f"prefetch_factor={config.data_prefetch_factor if data_worker_count > 0 else 0}, "
+        f"persistent_workers={bool(config.data_persistent_workers and data_worker_count > 0)}, "
+        f"pin_memory={pin_memory}"
+    )
+    if getattr(dataset, "uses_token_cache", False):
+        print(f"训练数据来源: token_cache（{config.token_cache_dir}）")
+
     start_time = time()
+    run_start_tokens = tokens_seen
     accumulated_steps = 0
     optimizer.zero_grad(set_to_none=True)
-    last_loss = None
-    last_grad_norm = None
+    last_loss = resume_state.get("last_loss")
+    last_loss_tensor = None
+    last_grad_norm = resume_state.get("last_grad_norm")
+    last_grad_norm_tensor = None
     last_eval_metric = None
     saved_step_checkpoints = set()
+    key_checkpoint_steps = set(config.key_checkpoints)
+    pending_save_latest = False
+    pending_save_numbered = False
+    pending_check_best = False
+    training_batch_iterator = None
+    device_batch_iterator = None
+    progress_bar = None
     try:
         progress_total = remaining_steps
-        batch_iterator = (
-            _build_progress_batch_iterator(
+        if remaining_steps is not None and remaining_steps <= 0:
+            batch_iterator = ()
+        else:
+            training_batch_iterator = _iter_parallel_training_batches(
                 dataset,
-                batch_size=config.batch_size,
-                epochs=config.epochs,
-                max_steps=remaining_steps,
-                progress_tracker=data_progress_tracker,
+                tokenizer,
+                config,
+                data_progress_tracker,
+                device,
+                worker_count=data_worker_count,
             )
-            if remaining_steps is None or remaining_steps > 0
-            else ()
-        )
+            device_batch_iterator = _iter_device_batches(
+                training_batch_iterator,
+                device,
+                async_h2d=pin_memory,
+            )
+            batch_iterator = device_batch_iterator
         progress_bar = tqdm(
-            batch_iterator,
             total=progress_total or None,
             desc="训练批次(dataset_batches)",
             unit="batch",
         )
-        for samples in progress_bar:
-            batch = _move_batch(_build_batch_tensors(samples, tokenizer, config, rng=length_rng), device)
+        for batch in batch_iterator:
+            if config.max_steps is not None and global_step >= int(config.max_steps):
+                break
+            progress_samples = batch.pop("_progress_samples", ())
+            thinking_summary_delta = batch.pop("_thinking_summary_delta", {})
+            token_count = int(batch["token_count"])
+            valid_target_count = int(batch["valid_target_count"])
+            packed_rows = int(batch["input_ids"].size(0))
             sequence_length = int(batch["input_ids"].size(1))
+            padded_tokens = packed_rows * sequence_length
+            attention_token_square = packed_rows * sequence_length * sequence_length
             _reset_cuda_peak_memory_stats(device)
             with torch.autocast(
                 device_type=device.type,
@@ -1849,68 +2760,76 @@ def train(
                 enabled=_autocast_enabled(device),
             ):
                 logits, _states = _forward_batch(model, batch)
-                loss, valid_targets = _compute_lm_loss(logits, batch["labels"])
+                loss, valid_targets = _compute_lm_loss(
+                    logits,
+                    batch["labels"],
+                    valid_target_count=valid_target_count,
+                    chunk_tokens=config.lm_loss_chunk_tokens,
+                )
             if loss is None:
-                # 极端截断或模板异常可能让 batch 没有监督 token，此时跳过该 batch。
+                # 无监督 token 的 batch 无法产生梯度，但必须标记为已检查，避免续训反复读取。
+                data_progress_tracker.update_after_batch(progress_samples)
                 del logits, _states, batch
                 continue
             scaled_loss = loss / int(config.gradient_accumulation_steps)
             scaled_loss.backward()
             accumulated_steps += 1
             global_step += 1
+            progress_bar.update(1)
             samples_seen += int(batch["sample_count"])
-            tokens_seen += int(batch["attention_mask"].sum().item())
-            last_loss = float(loss.detach().cpu())
-            _update_thinking_training_summary(
+            tokens_seen += token_count
+            last_loss_tensor = loss.detach()
+            _merge_thinking_training_summary(
                 thinking_summary,
-                samples,
-                thinking_mode=config.thinking_mode,
+                thinking_summary_delta,
             )
-            data_progress_tracker.update_after_batch(samples)
+            data_progress_tracker.update_after_batch(progress_samples)
             # backward 后计算图已释放；这些大张量不再参与后续日志/checkpoint。
             # 主动删除可避免上一轮长序列 logits 在下一轮短序列 forward 期间仍占用显存。
             del logits, _states, loss, scaled_loss, batch
 
             if accumulated_steps >= int(config.gradient_accumulation_steps):
-                trainable_parameters = [
-                    parameter for _, parameter in _iter_trainable_parameters(model)
-                ]
                 if config.max_grad_norm and float(config.max_grad_norm) > 0:
-                    last_grad_norm = float(
-                        torch.nn.utils.clip_grad_norm_(
-                            trainable_parameters,
-                            float(config.max_grad_norm),
-                        )
+                    last_grad_norm_tensor = torch.nn.utils.clip_grad_norm_(
+                        trainable_parameters,
+                        float(config.max_grad_norm),
                     )
                 else:
-                    last_grad_norm = _compute_grad_norm(trainable_parameters)
+                    last_grad_norm_tensor = _compute_grad_norm(trainable_parameters)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
                 optimizer_step += 1
                 accumulated_steps = 0
-            cuda_memory_metrics = _collect_cuda_memory_metrics(device)
-
-            progress_postfix = {
-                "损失(loss)": f"{last_loss:.4g}",
-                "全局步(global_step)": global_step,
-                "优化器步(optimizer_step)": optimizer_step,
-                "序列长度(sequence_length)": sequence_length,
-                "累积(accum)": accumulated_steps,
-            }
-            if last_grad_norm is not None:
-                progress_postfix["梯度范数(grad_norm)"] = f"{last_grad_norm:.4g}"
-            if cuda_memory_metrics:
-                progress_postfix["CUDA分配峰值MiB(cuda_peak_alloc)"] = (
-                    f"{cuda_memory_metrics['cuda_peak_memory_allocated_mib']:.1f}"
-                )
-                progress_postfix["CUDA保留MiB(cuda_reserved)"] = (
-                    f"{cuda_memory_metrics['cuda_memory_reserved_mib']:.1f}"
-                )
-            progress_bar.set_postfix(progress_postfix)
 
             should_log = global_step == 1 or global_step % max(1, int(config.log_interval)) == 0
             if should_log:
+                if last_loss_tensor is not None:
+                    last_loss = _scalar_to_float(last_loss_tensor)
+                    last_loss_tensor = None
+                if last_grad_norm_tensor is not None:
+                    last_grad_norm = _scalar_to_float(last_grad_norm_tensor)
+                    last_grad_norm_tensor = None
+                cuda_memory_metrics = _collect_cuda_memory_metrics(device)
+                progress_postfix = {
+                    "损失(loss)": f"{last_loss:.4g}",
+                    "全局步(global_step)": global_step,
+                    "优化器步(optimizer_step)": optimizer_step,
+                    "序列长度(sequence_length)": sequence_length,
+                    "填充行数(packed_rows)": packed_rows,
+                    "填充Token(padded_tokens)": padded_tokens,
+                    "累积(accum)": accumulated_steps,
+                }
+                if last_grad_norm is not None:
+                    progress_postfix["梯度范数(grad_norm)"] = f"{last_grad_norm:.4g}"
+                if cuda_memory_metrics:
+                    progress_postfix["CUDA分配峰值MiB(cuda_peak_alloc)"] = (
+                        f"{cuda_memory_metrics['cuda_peak_memory_allocated_mib']:.1f}"
+                    )
+                    progress_postfix["CUDA保留MiB(cuda_reserved)"] = (
+                        f"{cuda_memory_metrics['cuda_memory_reserved_mib']:.1f}"
+                    )
+                progress_bar.set_postfix(progress_postfix)
                 elapsed_seconds = max(time() - start_time, 1e-9)
                 metric = {
                     "stage": config.training_stage,
@@ -1921,8 +2840,11 @@ def train(
                     "samples_seen": samples_seen,
                     "tokens_seen": tokens_seen,
                     "sequence_length": sequence_length,
+                    "packed_rows": packed_rows,
+                    "padded_tokens": padded_tokens,
+                    "attention_token_square": attention_token_square,
                     "target_tokens": valid_targets,
-                    "tokens_per_sec": tokens_seen / elapsed_seconds,
+                    "tokens_per_sec": (tokens_seen - run_start_tokens) / elapsed_seconds,
                     "grad_norm": last_grad_norm,
                     "elapsed_seconds": round(elapsed_seconds, 4),
                 }
@@ -1944,6 +2866,50 @@ def train(
             else:
                 eval_metric_this_step = False
 
+            save_latest_triggered = bool(
+                config.latest_save_interval and global_step % int(config.latest_save_interval) == 0
+            )
+            save_step_triggered = bool(
+                config.save_interval and global_step % int(config.save_interval) == 0
+            )
+            save_key_triggered = int(global_step) in key_checkpoint_steps
+            check_best_triggered = (
+                bool(config.save_best_checkpoint)
+                and (
+                    save_latest_triggered
+                    or save_step_triggered
+                    or save_key_triggered
+                    or (config.best_checkpoint_metric == "eval_loss" and eval_metric_this_step)
+                )
+            )
+            pending_save_latest = pending_save_latest or save_latest_triggered
+            pending_save_numbered = pending_save_numbered or save_step_triggered or save_key_triggered
+            pending_check_best = pending_check_best or check_best_triggered
+            if accumulated_steps != 0:
+                # checkpoint 不保存参数梯度；等累计梯度提交后再保存，避免续训跳过未生效样本。
+                continue
+
+            should_save_latest = pending_save_latest
+            should_save_numbered = bool(
+                pending_save_numbered and int(global_step) not in saved_step_checkpoints
+            )
+            should_check_best = pending_check_best
+            pending_save_latest = False
+            pending_save_numbered = False
+            pending_check_best = False
+            needs_checkpoint_state = bool(
+                should_save_latest or should_save_numbered or should_check_best
+            )
+            if not needs_checkpoint_state:
+                continue
+
+            # 完整进度包含可能很大的 ordinal 集，只在实际 checkpoint 候选步构造。
+            if last_loss_tensor is not None:
+                last_loss = _scalar_to_float(last_loss_tensor)
+                last_loss_tensor = None
+            if last_grad_norm_tensor is not None:
+                last_grad_norm = _scalar_to_float(last_grad_norm_tensor)
+                last_grad_norm_tensor = None
             trainer_state = _build_trainer_state(
                 config,
                 global_step=global_step,
@@ -1956,29 +2922,12 @@ def train(
                 optimizer_group_summary=optimizer_group_summary,
                 data_progress_summary=data_progress_tracker.summary(),
                 thinking_summary=dict(thinking_summary),
+                data_pipeline_runtime=dict(data_pipeline_runtime),
             )
-            data_progress_payload = data_progress_tracker.to_payload(
-                config,
-                global_step=global_step,
-                optimizer_step=optimizer_step,
-                samples_seen=samples_seen,
-                tokens_seen=tokens_seen,
-            )
+            if last_grad_norm is not None:
+                trainer_state["last_grad_norm"] = last_grad_norm
 
-            should_save_latest = bool(
-                config.latest_save_interval and global_step % int(config.latest_save_interval) == 0
-            )
-            should_save_step = bool(config.save_interval and global_step % int(config.save_interval) == 0)
-            should_save_key = int(global_step) in set(config.key_checkpoints)
-            should_check_best = (
-                bool(config.save_best_checkpoint)
-                and (
-                    should_save_latest
-                    or should_save_step
-                    or should_save_key
-                    or (config.best_checkpoint_metric == "eval_loss" and eval_metric_this_step)
-                )
-            )
+            should_save_best = False
             if should_check_best:
                 # best checkpoint 与 latest/step 保存解耦：只有指标真的变优才额外发布 best 目录。
                 best_metric_value = _extract_best_metric_value(config, trainer_state)
@@ -1989,28 +2938,33 @@ def train(
                 ):
                     best_checkpoint_value = best_metric_value
                     best_checkpoint_global_step = global_step
-                    _attach_best_checkpoint_state(
-                        config,
-                        trainer_state,
-                        best_value=best_checkpoint_value,
-                        best_global_step=best_checkpoint_global_step,
-                    )
-                    _save_checkpoint(
-                        model,
-                        optimizer,
-                        scheduler,
-                        config,
-                        trainer_state,
-                        checkpoint_root=_best_checkpoint_root(config),
-                        data_progress=data_progress_payload,
-                    )
+                    should_save_best = True
             _attach_best_checkpoint_state(
                 config,
                 trainer_state,
                 best_value=best_checkpoint_value,
                 best_global_step=best_checkpoint_global_step,
             )
-            if (should_save_step or should_save_key) and int(global_step) not in saved_step_checkpoints:
+            if not (should_save_best or should_save_numbered or should_save_latest):
+                continue
+            data_progress_payload = data_progress_tracker.to_payload(
+                config,
+                global_step=global_step,
+                optimizer_step=optimizer_step,
+                samples_seen=samples_seen,
+                tokens_seen=tokens_seen,
+            )
+            if should_save_best:
+                _save_checkpoint(
+                    model,
+                    optimizer,
+                    scheduler,
+                    config,
+                    trainer_state,
+                    checkpoint_root=_best_checkpoint_root(config),
+                    data_progress=data_progress_payload,
+                )
+            if should_save_numbered:
                 _save_checkpoint(
                     model,
                     optimizer,
@@ -2037,24 +2991,37 @@ def train(
             trainable_parameters = [
                 parameter for _, parameter in _iter_trainable_parameters(model)
             ]
+            _rescale_partial_accumulated_gradients(
+                trainable_parameters,
+                completed_steps=accumulated_steps,
+                target_steps=config.gradient_accumulation_steps,
+            )
             if config.max_grad_norm and float(config.max_grad_norm) > 0:
-                last_grad_norm = float(
-                    torch.nn.utils.clip_grad_norm_(
-                        trainable_parameters,
-                        float(config.max_grad_norm),
-                    )
+                last_grad_norm_tensor = torch.nn.utils.clip_grad_norm_(
+                    trainable_parameters,
+                    float(config.max_grad_norm),
                 )
             else:
-                last_grad_norm = _compute_grad_norm(trainable_parameters)
+                last_grad_norm_tensor = _compute_grad_norm(trainable_parameters)
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
             optimizer_step += 1
     finally:
+        if progress_bar is not None:
+            progress_bar.close()
+        if device_batch_iterator is not None:
+            device_batch_iterator.close()
+        if training_batch_iterator is not None:
+            training_batch_iterator.close()
         if tensorboard_writer is not None:
             tensorboard_writer.flush()
             tensorboard_writer.close()
 
+    if last_loss_tensor is not None:
+        last_loss = _scalar_to_float(last_loss_tensor)
+    if last_grad_norm_tensor is not None:
+        last_grad_norm = _scalar_to_float(last_grad_norm_tensor)
     trainer_state = _build_trainer_state(
         config,
         global_step=global_step,
@@ -2067,6 +3034,7 @@ def train(
         optimizer_group_summary=optimizer_group_summary,
         data_progress_summary=data_progress_tracker.summary(),
         thinking_summary=dict(thinking_summary),
+        data_pipeline_runtime=dict(data_pipeline_runtime),
     )
     data_progress_payload = data_progress_tracker.to_payload(
         config,
@@ -2107,6 +3075,18 @@ def train(
         best_value=best_checkpoint_value,
         best_global_step=best_checkpoint_global_step,
     )
+    if pending_save_numbered and int(global_step) not in saved_step_checkpoints:
+        # 训练尾部不足一个累积窗口时，残余梯度已在上方提交；此时补发到期的 step/key checkpoint。
+        _save_checkpoint(
+            model,
+            optimizer,
+            scheduler,
+            config,
+            trainer_state,
+            is_latest=False,
+            data_progress=data_progress_payload,
+        )
+        saved_step_checkpoints.add(int(global_step))
     _save_checkpoint(
         model,
         optimizer,

@@ -6,6 +6,7 @@ from argparse import ArgumentParser
 from pathlib import Path
 
 from lpt_config import ChatSFTTrainingConfig
+from lpt_config.constants import DEFAULT_OPTIMIZER_TYPE, DEFAULT_GRADIENT_CHECKPOINTING
 from lpt_inference import display_model_parameter_summary
 from lpt_training import TrainingRunConfig, resolve_latest_training_checkpoint, train
 
@@ -19,7 +20,7 @@ from .common import (
     find_existing_model_checkpoint,
     instantiate_model,
     load_checkpoint_model,
-    load_dataset_from_manifest,
+    load_chat_training_dataset,
     load_eval_dataset,
     merge_training_args_with_recipe,
     apply_longrope2_runtime_overrides,
@@ -103,11 +104,21 @@ def train_chat_sft_model(
     args = merge_training_args_with_recipe(args, CHAT_SFT_RECIPE)
     apply_longrope2_runtime_overrides(build_longrope2_options_from_args(args))
     tokenizer = build_local_tokenizer()
-    dataset = load_dataset_from_manifest(
+    resume_for_data = None if args.no_resume else resolve_chat_sft_resume_checkpoint()
+    dataset, token_cache_dir = load_chat_training_dataset(
         manifest_path,
-        expected_types={"chat"},
-        seed=args.seed,
+        tokenizer,
+        args,
+        resume_checkpoint=resume_for_data,
     )
+    if getattr(args, "build_cache_only", False):
+        if token_cache_dir is None:
+            raise RuntimeError("--build-cache-only 未能构建 chat token cache。")
+        print("--build-cache-only：chat token cache 已就绪，跳过模型与训练。")
+        return None, tokenizer, None
+    if token_cache_dir is not None and getattr(dataset, "total_count", None) == 0:
+        print("所有 chat SFT 数据集已完成训练且缓存仍有效，跳过本次训练。")
+        return None, tokenizer, None
     eval_dataset = load_eval_dataset(eval_manifest_path, expected_types={"chat"})
     model, resume_checkpoint = _load_or_initialize_model(args, tokenizer)
     display_model_parameter_summary(model)
@@ -122,13 +133,15 @@ def train_chat_sft_model(
             checkpoint_dir=resolve_chat_sft_checkpoint_root(),
             inference_weight_path=resolve_chat_sft_inference_weight_path(),
             save_inference_weights=not args.no_save_inference_weights,
-            batch_size=args.batch_size,
             epochs=args.epochs,
             max_steps=args.max_steps,
             learning_rate=args.learning_rate,
             weight_decay=args.weight_decay,
+            optimizer_type=getattr(args, "optimizer_type", DEFAULT_OPTIMIZER_TYPE),
+            gradient_checkpointing=getattr(args, "gradient_checkpointing", DEFAULT_GRADIENT_CHECKPOINTING),
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             max_grad_norm=args.max_grad_norm,
+            lm_loss_chunk_tokens=args.lm_loss_chunk_tokens,
             warmup_ratio=args.warmup_ratio,
             log_interval=args.log_interval,
             eval_interval=args.eval_interval,
@@ -144,6 +157,16 @@ def train_chat_sft_model(
             save_scheduler=not args.no_save_scheduler,
             max_sequence_length=args.train_max_sequence_length,
             sequence_packing=not args.no_sequence_packing,
+            data_num_workers=args.data_num_workers,
+            data_prefetch_factor=args.data_prefetch_factor,
+            data_persistent_workers=args.data_persistent_workers,
+            data_pin_memory=args.data_pin_memory,
+            data_reader_num_workers=args.data_reader_num_workers,
+            data_reader_chunk_bytes=args.data_reader_chunk_bytes,
+            token_cache_dir=token_cache_dir,
+            token_cache_enabled=token_cache_dir is not None,
+            data_length_bucket_window=args.data_length_bucket_window,
+            data_packing_strategy=args.data_packing_strategy,
             thinking_mode=args.thinking_mode,
             thinking_visibility=args.thinking_visibility,
             seed=args.seed,
@@ -168,6 +191,7 @@ def build_parser():
     parser = ArgumentParser(description="运行 LPT v2 chat SFT 阶段。")
     parser.add_argument("--manifest", type=Path, default=CHAT_SFT_MANIFEST_PATH, help="chat SFT manifest。")
     parser.add_argument("--eval-manifest", type=Path, default=None, help="验证 manifest。")
+    parser.add_argument("--build-cache-only", action="store_true", default=False, help="只构建或校验 chat token cache，跳过模型与训练。")
     add_training_arguments(parser, recipe=CHAT_SFT_RECIPE)
     add_longrope2_training_arguments(parser, recipe=CHAT_SFT_RECIPE)
     return parser

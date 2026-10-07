@@ -22,6 +22,7 @@ from .execution import (
     parse_cuda_visible_devices,
     resolve_execution_plan,
 )
+from .grouped_moe import grouped_swiglu_cpu, grouped_swiglu_cuda
 
 __all__ = [
     "ATTENTION_BACKEND_CAPABILITIES",
@@ -42,4 +43,6 @@ __all__ = [
     "parse_cuda_visible_devices",
     "resolve_attention_backend",
     "resolve_execution_plan",
+    "grouped_swiglu_cpu",
+    "grouped_swiglu_cuda",
 ]
