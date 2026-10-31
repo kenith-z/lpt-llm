@@ -48,49 +48,21 @@ from .state_pool_v2 import RetNetAssistStatePool, xLSTMMemoryStatePool
 DEFAULT_REQUEST_ID = "default"
 
 
-def _as_layer_state_v2(layer_state):
-    """把调用方传入的 layer_state 规范化为 v2 状态对象。"""
-    if layer_state is None:
-        return LayerStateV2()
-    if not isinstance(layer_state, LayerStateV2):
-        raise TypeError("LPT v2 layer_state 必须是 LayerStateV2 或 None。")
-    return layer_state
-
-
 def _slice_tail_mask(attention_mask, key_length):
     """取与当前 K/V 长度对齐的 attention mask 尾段。"""
     if attention_mask is None:
         return None
-    if attention_mask.size(1) < key_length:
-        raise ValueError("attention_mask 长度不能短于当前 K/V 长度。")
     return attention_mask[:, -key_length:]
-
-
-def _move_optional_tensor(tensor, device, *, dtype=None):
-    """移动可选张量，避免调用方到处重复 None 判断。"""
-    if tensor is None:
-        return None
-    if dtype is None:
-        return tensor.to(device=device)
-    return tensor.to(device=device, dtype=dtype)
-
-
-def _retnet_enabled_for_layer(config, layer_index):
-    """按配置判断当前层是否实际挂载 RetNetAssist。"""
-    return is_retnet_assist_enabled_for_layer(config, layer_index)
 
 
 def _retnet_group_id(config, layer_index):
     """把层号映射到 RetNet 参数/状态共享组。"""
-    group_size = int(config.retnet_sharing_group_size)
-    if group_size <= 0:
-        raise ValueError("retnet_sharing_group_size 必须为正整数。")
-    return int(layer_index) // group_size
+    return int(layer_index) // int(config.retnet_sharing_group_size)
 
 
 def _retnet_parameter_slot_for_layer(config, layer_index):
     """计算当前层应该复用的 RetNet 参数槽位。"""
-    if not _retnet_enabled_for_layer(config, layer_index):
+    if not is_retnet_assist_enabled_for_layer(config, layer_index):
         return None
     sharing = str(config.retnet_parameter_sharing)
     if sharing == "global":
@@ -104,7 +76,7 @@ def _retnet_parameter_slot_for_layer(config, layer_index):
 
 def _retnet_state_slot_for_layer(config, layer_index):
     """计算当前层应该绑定的 RetNet request-bound 状态槽位。"""
-    if not _retnet_enabled_for_layer(config, layer_index):
+    if not is_retnet_assist_enabled_for_layer(config, layer_index):
         return int(layer_index)
     sharing = str(config.retnet_state_sharing)
     if sharing == "group":
@@ -124,11 +96,9 @@ def _retnet_state_slot_count(config):
     slots = {
         _retnet_state_slot_for_layer(config, layer_index)
         for layer_index in range(int(config.num_layers))
-        if _retnet_enabled_for_layer(config, layer_index)
+        if is_retnet_assist_enabled_for_layer(config, layer_index)
     }
-    if not slots:
-        return int(config.num_layers)
-    return max(slots) + 1
+    return max(slots) + 1 if slots else int(config.num_layers)
 
 
 def _build_local_attention_mask(
@@ -418,20 +388,6 @@ class QOnlyRetNetAdapter(nn.Module):
         )
         self.alpha_q = nn.Parameter(torch.tensor(float(config.retnet_adapter_alpha_q_init), dtype=torch.float32))
         self.alpha_q.requires_grad_(bool(config.retnet_adapter_alpha_q_trainable))
-        self.k_adapter_enabled = bool(config.retnet_k_adapter_enabled)
-        if self.k_adapter_enabled:
-            self.k_down_projection = nn.Linear(config.retnet_state_dim, config.retnet_adapter_rank, bias=False)
-            self.k_up_projection = nn.Linear(
-                config.retnet_adapter_rank,
-                self.num_kv_heads * self.head_dim,
-                bias=False,
-            )
-            self.alpha_k = nn.Parameter(torch.tensor(float(config.retnet_adapter_alpha_k_init), dtype=torch.float32))
-            self.alpha_k.requires_grad_(bool(config.retnet_adapter_alpha_k_trainable))
-        else:
-            self.k_down_projection = None
-            self.k_up_projection = None
-            self.alpha_k = None
 
     def _apply(self, fn):
         """保持 RetNet scale 参数始终为 FP32，避免半精度下小 scale 被吞掉。"""
@@ -439,23 +395,12 @@ class QOnlyRetNetAdapter(nn.Module):
         self.alpha_q.data = self.alpha_q.data.float()
         if self.alpha_q.grad is not None:
             self.alpha_q.grad.data = self.alpha_q.grad.data.float()
-        if self.alpha_k is not None:
-            self.alpha_k.data = self.alpha_k.data.float()
-            if self.alpha_k.grad is not None:
-                self.alpha_k.grad.data = self.alpha_k.grad.data.float()
         return self
 
     def _query_delta(self, summary_sequence, query):
         """把低维摘要投影到 Q 的 head 形状。"""
         delta = self.up_projection(self.down_projection(summary_sequence))
         return delta.view(query.size(0), query.size(2), self.num_heads, self.head_dim).transpose(1, 2)
-
-    def _key_delta(self, summary_sequence, key):
-        """实验性 K adapter；默认关闭，避免污染当前 Q-only 主线。"""
-        if not self.k_adapter_enabled or self.k_down_projection is None or self.k_up_projection is None:
-            return None
-        delta = self.k_up_projection(self.k_down_projection(summary_sequence))
-        return delta.view(key.size(0), key.size(2), self.num_kv_heads, self.head_dim).transpose(1, 2)
 
     def forward(self, summary_sequence, query):
         """只调制 Q 的默认路径，保持 K/V cache 语义稳定。"""
@@ -471,18 +416,10 @@ class QOnlyRetNetAdapter(nn.Module):
         *,
         collect_runtime_metrics=True,
     ):
-        """同时返回调制后的 Q/K 以及 adapter 观测指标。"""
+        """同时返回调制后的 Q/K 以及 adapter 观测指标。只调制 Q，K 保持不变。"""
         q_delta = self._query_delta(summary_sequence, query)
         alpha_q = self.alpha_q.to(dtype=query.dtype)
         query = query + alpha_q * q_delta
-
-        k_delta = self._key_delta(summary_sequence, key)
-        alpha_k_value = None
-        if k_delta is not None and self.alpha_k is not None:
-            alpha_k = self.alpha_k.to(dtype=key.dtype)
-            key = key + alpha_k * k_delta
-            if collect_runtime_metrics and not torch.is_grad_enabled():
-                alpha_k_value = float(self.alpha_k.detach().cpu())
 
         metrics = {
             "q_adapter_delta_norm": None,
@@ -493,11 +430,9 @@ class QOnlyRetNetAdapter(nn.Module):
         if collect_runtime_metrics and not torch.is_grad_enabled():
             metrics = {
                 "q_adapter_delta_norm": float(q_delta.float().norm(dim=-1).mean().detach().cpu()),
-                "k_adapter_delta_norm": 0.0
-                if k_delta is None
-                else float(k_delta.float().norm(dim=-1).mean().detach().cpu()),
+                "k_adapter_delta_norm": 0.0,
                 "alpha_q": float(self.alpha_q.detach().cpu()),
-                "alpha_k": alpha_k_value,
+                "alpha_k": None,
             }
         return query, key, metrics
 
@@ -584,7 +519,7 @@ class LocalAttentionMixerV2(nn.Module):
 
     def _retnet_enabled_for_layer(self):
         """本层是否参与 RetNetAssist 参数和状态更新。"""
-        return _retnet_enabled_for_layer(self.config, self.layer_index)
+        return is_retnet_assist_enabled_for_layer(self.config, self.layer_index)
 
     def _read_past_kv(self, attention_state):
         """读取上一轮 decode/prefill 保存的 K/V，兼容 paged 与 dense fallback。"""
@@ -610,7 +545,7 @@ class LocalAttentionMixerV2(nn.Module):
         collect_runtime_state=True,
     ):
         """执行单层局部注意力，并返回新的 Attention/RetNet 状态。"""
-        layer_state = _as_layer_state_v2(layer_state)
+        layer_state = layer_state or LayerStateV2()
         batch_size, query_length, _ = x_norm.shape
 
         # Q/K/V 先由当前 token 的归一化特征生成，RetNetAssist 只在后续调制 Q/K；
@@ -888,9 +823,6 @@ class xLSTMMemoryAssist(nn.Module):
         self.down_projection = nn.Linear(self.state_dim, int(config.xlstm_memory_adapter_rank), bias=False)
         self.up_projection = nn.Linear(int(config.xlstm_memory_adapter_rank), self.hidden_size, bias=False)
         self.beta = nn.Parameter(self._init_beta_parameter(config))
-        self.memory_gate = None
-        if bool(config.xlstm_memory_gate_enabled):
-            self.memory_gate = nn.Linear(self.hidden_size, self.state_dim, bias=True)
 
     @staticmethod
     def _init_beta_parameter(config):
@@ -994,9 +926,6 @@ class xLSTMMemoryAssist(nn.Module):
             return h_ffn, None
         previous_state = None if layer_state is None else layer_state.xlstm_memory
         memory_input = torch.tanh(self.input_proj(h_ffn))
-        if self.memory_gate is not None:
-            gate_m = torch.sigmoid(self.memory_gate(h_ffn))
-            memory_input = memory_input * gate_m
         if attention_mask is None:
             token_mask = torch.ones(h_ffn.size(0), h_ffn.size(1), device=h_ffn.device, dtype=h_ffn.dtype)
         else:
@@ -1141,7 +1070,7 @@ class LPTBlockV2(nn.Module):
         collect_runtime_state=True,
     ):
         """执行一个 LPT v2 block：Attention-First，再进入记忆增强 MoE FFN。"""
-        layer_state = _as_layer_state_v2(layer_state)
+        layer_state = layer_state or LayerStateV2()
         attn_out, layer_state = self.attention_mixer(
             self.sequence_norm(x),
             position_ids=position_ids,
@@ -1333,7 +1262,7 @@ class LPTV2(nn.Module):
         """按 state_slot 收集上一轮 RetNet 状态，支持 group/per-layer 状态共享。"""
         states_by_slot = {}
         for layer_index, layer_state in enumerate(layer_states):
-            if not _retnet_enabled_for_layer(self.config, layer_index):
+            if not is_retnet_assist_enabled_for_layer(self.config, layer_index):
                 continue
             if layer_state is None or layer_state.retnet_assist is None:
                 continue
@@ -1447,8 +1376,8 @@ class LPTV2(nn.Module):
         new_states = []
 
         for layer_index, (layer, layer_state) in enumerate(zip(self.layers, previous_states)):
-            layer_state = _as_layer_state_v2(layer_state)
-            if _retnet_enabled_for_layer(self.config, layer_index):
+            layer_state = layer_state or LayerStateV2()
+            if is_retnet_assist_enabled_for_layer(self.config, layer_index):
                 state_slot = self.retnet_layer_to_state_slot[layer_index]
                 if state_slot in previous_retnet_states:
                     # 同一个 RetNet state_slot 可能被多个层共享；传入 block 前只改 layer_index，
@@ -1464,7 +1393,7 @@ class LPTV2(nn.Module):
             layer_input_ids = input_ids.to(device=layer_device)
             layer_position_ids = position_ids.to(device=layer_device)
             layer_attention_mask = attention_mask.to(device=layer_device, dtype=torch.long)
-            layer_segment_ids = _move_optional_tensor(segment_ids, layer_device, dtype=torch.long)
+            layer_segment_ids = segment_ids.to(device=layer_device, dtype=torch.long) if segment_ids is not None else None
             if rope_cache.original_embedding.rescale_factors.device != layer_device:
                 rope_cache.to(device=layer_device, dtype=hidden_states.dtype)
 

@@ -421,21 +421,10 @@ _TOKEN_LENGTH_FIELD_NAMES = (
 
 
 def _coerce_token_length(value, *, sample_index):
-    """把长度元数据转换成严格的正整数，避免静默截断浮点或布尔值。"""
-    if isinstance(value, bool) or value is None:
-        raise ValueError(f"样本 {sample_index} 的 token 长度不是正整数: {value!r}。")
-    try:
-        integer_value = int(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(
-            f"样本 {sample_index} 的 token 长度不是正整数: {value!r}。"
-        ) from exc
-    try:
-        is_integral = float(value) == float(integer_value)
-    except (TypeError, ValueError, OverflowError):
-        is_integral = str(value).strip() == str(integer_value)
-    if not is_integral or integer_value <= 0:
-        raise ValueError(f"样本 {sample_index} 的 token 长度不是正整数: {value!r}。")
+    """把长度元数据转换成严格的正整数。"""
+    integer_value = int(value)
+    if integer_value <= 0:
+        raise ValueError(f"样本 {sample_index} 的 token 长度必须为正整数: {value!r}。")
     return integer_value
 
 
@@ -829,37 +818,20 @@ def _pad_batch(
         zip(batch_input_ids, batch_labels, batch_thinking_mode_ids, batch_target_channel_ids)
     ):
         sequence_length = len(sequence)
-        input_ids[row_index, :sequence_length] = _sequence_to_tensor(
-            sequence,
-            dtype=torch.long,
+        input_ids[row_index, :sequence_length] = (
+            torch.from_numpy(sequence) if isinstance(sequence, np.ndarray) else torch.tensor(sequence, dtype=torch.long)
         )
-        labels[row_index, :sequence_length] = _sequence_to_tensor(
-            sequence_labels,
-            dtype=torch.long,
+        labels[row_index, :sequence_length] = (
+            torch.from_numpy(sequence_labels) if isinstance(sequence_labels, np.ndarray) else torch.tensor(sequence_labels, dtype=torch.long)
         )
         attention_mask[row_index, :sequence_length] = 1
-        thinking_mode_ids[row_index, :sequence_length] = _sequence_to_tensor(
-            sequence_thinking_mode_ids,
-            dtype=torch.long,
+        thinking_mode_ids[row_index, :sequence_length] = (
+            torch.from_numpy(sequence_thinking_mode_ids) if isinstance(sequence_thinking_mode_ids, np.ndarray) else torch.tensor(sequence_thinking_mode_ids, dtype=torch.long)
         )
-        target_channel_ids[row_index, :sequence_length] = _sequence_to_tensor(
-            sequence_target_channel_ids,
-            dtype=torch.long,
+        target_channel_ids[row_index, :sequence_length] = (
+            torch.from_numpy(sequence_target_channel_ids) if isinstance(sequence_target_channel_ids, np.ndarray) else torch.tensor(sequence_target_channel_ids, dtype=torch.long)
         )
     return input_ids, labels, attention_mask, thinking_mode_ids, target_channel_ids
-
-
-def _sequence_to_tensor(sequence, *, dtype):
-    """把 tuple 或 numpy 序列快速转成 torch 张量。
-
-    numpy int64 数组直接用 ``from_numpy`` 共享底层缓冲区，避免再走一次
-    Python 逐元素装箱；tuple 保持 ``torch.tensor`` 历史行为。
-    """
-    if isinstance(sequence, np.ndarray):
-        if sequence.dtype == np.int64:
-            return torch.from_numpy(sequence)
-        return torch.from_numpy(np.asarray(sequence, dtype=np.int64))
-    return torch.tensor(sequence, dtype=dtype)
 
 
 def _build_packed_sequence(encoded_samples):
@@ -1011,30 +983,24 @@ def _pad_packed_batch(packed_sequences, pad_token_id, pad_to_multiple_of=None):
 
     for row_index, packed_sequence in enumerate(packed_sequences):
         sequence_length = packed_sequence.length
-        input_ids[row_index, :sequence_length] = _sequence_to_tensor(
-            packed_sequence.input_ids,
-            dtype=torch.long,
+        input_ids[row_index, :sequence_length] = (
+            torch.from_numpy(packed_sequence.input_ids) if isinstance(packed_sequence.input_ids, np.ndarray) else torch.tensor(packed_sequence.input_ids, dtype=torch.long)
         )
-        labels[row_index, :sequence_length] = _sequence_to_tensor(
-            packed_sequence.labels,
-            dtype=torch.long,
+        labels[row_index, :sequence_length] = (
+            torch.from_numpy(packed_sequence.labels) if isinstance(packed_sequence.labels, np.ndarray) else torch.tensor(packed_sequence.labels, dtype=torch.long)
         )
         attention_mask[row_index, :sequence_length] = 1
-        thinking_mode_ids[row_index, :sequence_length] = _sequence_to_tensor(
-            packed_sequence.thinking_mode_ids,
-            dtype=torch.long,
+        thinking_mode_ids[row_index, :sequence_length] = (
+            torch.from_numpy(packed_sequence.thinking_mode_ids) if isinstance(packed_sequence.thinking_mode_ids, np.ndarray) else torch.tensor(packed_sequence.thinking_mode_ids, dtype=torch.long)
         )
-        target_channel_ids[row_index, :sequence_length] = _sequence_to_tensor(
-            packed_sequence.target_channel_ids,
-            dtype=torch.long,
+        target_channel_ids[row_index, :sequence_length] = (
+            torch.from_numpy(packed_sequence.target_channel_ids) if isinstance(packed_sequence.target_channel_ids, np.ndarray) else torch.tensor(packed_sequence.target_channel_ids, dtype=torch.long)
         )
-        position_ids[row_index, :sequence_length] = _sequence_to_tensor(
-            packed_sequence.position_ids,
-            dtype=torch.long,
+        position_ids[row_index, :sequence_length] = (
+            torch.from_numpy(packed_sequence.position_ids) if isinstance(packed_sequence.position_ids, np.ndarray) else torch.tensor(packed_sequence.position_ids, dtype=torch.long)
         )
-        segment_ids[row_index, :sequence_length] = _sequence_to_tensor(
-            packed_sequence.segment_ids,
-            dtype=torch.long,
+        segment_ids[row_index, :sequence_length] = (
+            torch.from_numpy(packed_sequence.segment_ids) if isinstance(packed_sequence.segment_ids, np.ndarray) else torch.tensor(packed_sequence.segment_ids, dtype=torch.long)
         )
     return input_ids, labels, attention_mask, thinking_mode_ids, target_channel_ids, position_ids, segment_ids
 

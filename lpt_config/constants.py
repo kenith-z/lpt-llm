@@ -171,7 +171,7 @@ CHAT_SFT_TOKEN_CACHE_ENABLED = True
 CHAT_LORA_TOKEN_CACHE_ENABLED = True
 
 # chat_sft 默认 epoch 数。
-CHAT_SFT_EPOCHS = 2
+CHAT_SFT_EPOCHS = 1
 # chat_sft 默认学习率。
 CHAT_SFT_LEARNING_RATE = 3e-4
 # chat_sft 默认 warmup 比例。

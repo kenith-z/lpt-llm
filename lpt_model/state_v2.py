@@ -16,12 +16,6 @@ MOE_LAYER_STATE_TYPE = "moe_layer_state"
 XLSTM_MEMORY_STATE_TYPE = "xlstm_memory_state"
 
 
-def _normalize_request_id(request_id):
-    """统一 request_id 的文本形态，状态池以它作为隔离键。"""
-    request_id_text = str(request_id)
-    if not request_id_text:
-        raise ValueError("request_id 不能为空。")
-    return request_id_text
 
 
 @dataclass(frozen=True)
@@ -34,14 +28,10 @@ class StateReleaseMetadata:
     released_at_token_count: int | None = None
 
     def __post_init__(self):
-        """冻结 dataclass 下仍统一校验 request_id 与 token 计数类型。"""
-        object.__setattr__(self, "request_id", _normalize_request_id(self.request_id))
+        """规范化字段类型。"""
+        object.__setattr__(self, "request_id", str(self.request_id))
         if self.released_at_token_count is not None:
-            object.__setattr__(
-                self,
-                "released_at_token_count",
-                int(self.released_at_token_count),
-            )
+            object.__setattr__(self, "released_at_token_count", int(self.released_at_token_count))
 
     def mark_released(self, reason, token_count=None):
         """标记为显式释放；Paged KV 裁剪不应调用这个入口。"""
@@ -73,14 +63,12 @@ class PagedKVReference:
     window_token_count: int = 0
 
     def __post_init__(self):
-        """校验页表引用基本形态，禁止负 token 计数进入状态树。"""
-        object.__setattr__(self, "request_id", _normalize_request_id(self.request_id))
+        """规范化字段类型。"""
+        object.__setattr__(self, "request_id", str(self.request_id))
         object.__setattr__(self, "layer_index", int(self.layer_index))
         object.__setattr__(self, "page_ids", tuple(int(page_id) for page_id in self.page_ids))
         object.__setattr__(self, "token_count", int(self.token_count))
         object.__setattr__(self, "window_token_count", int(self.window_token_count))
-        if self.token_count < 0 or self.window_token_count < 0:
-            raise ValueError("token_count 与 window_token_count 不能为负数。")
 
     def trim(self, kept_page_ids, *, token_count=None, window_token_count=None):
         """返回裁剪后的 Paged KV 引用，不触碰任何 Assist state。"""
@@ -117,8 +105,8 @@ class AttentionLayerState:
     state_type: str = ATTENTION_LAYER_STATE_V2_TYPE
 
     def __post_init__(self):
-        """确保 Attention 状态与 Paged KV 引用绑定同一 request/layer。"""
-        object.__setattr__(self, "request_id", _normalize_request_id(self.request_id))
+        """规范化字段类型。"""
+        object.__setattr__(self, "request_id", str(self.request_id))
         object.__setattr__(self, "layer_index", int(self.layer_index))
         object.__setattr__(self, "dense_kv_state", tuple(self.dense_kv_state))
         if self.paged_kv_ref is not None:
@@ -171,16 +159,12 @@ class RetNetAssistState:
     state_type: str = RETNET_ASSIST_STATE_TYPE
 
     def __post_init__(self):
-        """规范化 RetNet 状态槽和观测指标，保证 checkpoint 元数据可 JSON 化。"""
-        object.__setattr__(self, "request_id", _normalize_request_id(self.request_id))
+        """规范化字段类型。"""
+        object.__setattr__(self, "request_id", str(self.request_id))
         object.__setattr__(self, "layer_index", int(self.layer_index))
         state_slot = self.layer_index if self.state_slot is None else int(self.state_slot)
-        if state_slot < 0:
-            raise ValueError("state_slot 不能为负数。")
         object.__setattr__(self, "state_slot", state_slot)
         object.__setattr__(self, "token_count", int(self.token_count))
-        if self.token_count < 0:
-            raise ValueError("token_count 不能为负数。")
         for field_name in (
             "summary_norm",
             "q_adapter_delta_norm",
@@ -194,8 +178,6 @@ class RetNetAssistState:
             if value is not None:
                 object.__setattr__(self, field_name, float(value))
         release_metadata = self.release_metadata or StateReleaseMetadata(self.request_id)
-        if release_metadata.request_id != self.request_id:
-            raise ValueError("release_metadata 的 request_id 必须与 RetNetAssistState 一致。")
         object.__setattr__(self, "release_metadata", release_metadata)
 
     def mark_released(self, reason, token_count=None):
@@ -237,8 +219,8 @@ class MoELayerState:
     state_type: str = MOE_LAYER_STATE_TYPE
 
     def __post_init__(self):
-        """规范化 MoE router 观测计数。"""
-        object.__setattr__(self, "request_id", _normalize_request_id(self.request_id))
+        """规范化字段类型。"""
+        object.__setattr__(self, "request_id", str(self.request_id))
         object.__setattr__(self, "layer_index", int(self.layer_index))
         object.__setattr__(
             self,
@@ -278,22 +260,18 @@ class xLSTMMemoryState:
     state_type: str = XLSTM_MEMORY_STATE_TYPE
 
     def __post_init__(self):
-        """校验 xLSTM 记忆状态计数和观测指标。"""
-        object.__setattr__(self, "request_id", _normalize_request_id(self.request_id))
+        """规范化字段类型。"""
+        object.__setattr__(self, "request_id", str(self.request_id))
         object.__setattr__(self, "layer_index", int(self.layer_index))
         object.__setattr__(self, "token_count", int(self.token_count))
         object.__setattr__(self, "last_decay_token_count", int(self.last_decay_token_count))
         object.__setattr__(self, "decay_count", int(self.decay_count))
         object.__setattr__(self, "reset_count", int(self.reset_count))
-        if self.token_count < 0 or self.last_decay_token_count < 0 or self.decay_count < 0 or self.reset_count < 0:
-            raise ValueError("token_count、last_decay_token_count、decay_count 与 reset_count 不能为负数。")
         for field_name in ("effective_beta", "memory_norm", "adapter_delta_norm"):
             value = getattr(self, field_name)
             if value is not None:
                 object.__setattr__(self, field_name, float(value))
         release_metadata = self.release_metadata or StateReleaseMetadata(self.request_id)
-        if release_metadata.request_id != self.request_id:
-            raise ValueError("release_metadata 的 request_id 必须与 xLSTMMemoryState 一致。")
         object.__setattr__(self, "release_metadata", release_metadata)
 
     def mark_released(self, reason, token_count=None):

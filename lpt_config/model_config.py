@@ -101,7 +101,6 @@ _LIST_LIKE_MODEL_CONFIG_FIELDS = (
     "longrope2_mscale_factors",
     "attention_backend_priority",
     "retnet_assist_selected_layers",
-    "retnet_adapter_target",
     "xlstm_memory_adapter_beta_range",
     "xlstm_memory_selected_layers",
     "xlstm_memory_reset_trigger_mode",
@@ -351,22 +350,12 @@ class ModelConfig:
     retnet_state_dim: int = 64
     # 第 26 项：RetNetAssist Q adapter 的低秩投影 rank，实验后保持 rank16。
     retnet_adapter_rank: int = 16
-    # 第 24 项：RetNetAssist adapter 目标；默认只调制 Q，Q/K 不进入默认主干。
-    retnet_adapter_target: tuple[str, ...] = field(default_factory=lambda: ("q",))
     # 第 24/26 项：Q adapter FP32 scale 初始值。
     retnet_adapter_alpha_q_init: float = 1e-4
     # 第 24/26 项：Q adapter alpha 的参数 dtype；当前固定 FP32。
     retnet_adapter_alpha_q_dtype: str = "fp32"
     # 第 24/26 项：Q adapter alpha 是否可训练。
     retnet_adapter_alpha_q_trainable: bool = True
-    # 第 24 项：K adapter FP32 scale 初始值；只有 retnet_k_adapter_enabled=true 时实例化参数。
-    retnet_adapter_alpha_k_init: float = 1e-4
-    # 第 24 项：K adapter alpha 的参数 dtype；当前固定 FP32。
-    retnet_adapter_alpha_k_dtype: str = "fp32"
-    # 第 24 项：K adapter alpha 是否可训练。
-    retnet_adapter_alpha_k_trainable: bool = True
-    # 第 24 项：是否启用 K adapter；实验结论为不进入主干，默认关闭。
-    retnet_k_adapter_enabled: bool = False
     # 第 27 项：是否启用上下文 adapter；复用 RetNetAssist summary，不新增第二套状态。
     retnet_context_adapter_enabled: bool = True
     # 第 27 项：上下文 adapter 的 FP32 trainable scale 初始值。
@@ -415,10 +404,6 @@ class ModelConfig:
     xlstm_memory_adapter_beta_range: tuple[float, float] = (1e-5, 1.0)
     # 第 19 项约束：xLSTMAssist 是否作为 router 目标；必须为 false。
     xlstm_memory_as_router_target: bool = False
-    # 第 22 项：是否启用额外 memory gate；实验结论为放弃，默认关闭。
-    xlstm_memory_gate_enabled: bool = False
-    # 第 22 项：memory gate 模式；仅在启用 gate 时生效。
-    xlstm_memory_gate_mode: str = "input_conditioned_eval"
     # 第 23 项：xLSTMAssist 状态粒度策略；与 every_4_layers 层策略保持一致。
     xlstm_memory_granularity: str = "every_4_layers"
     # 第 19/20 项：xLSTMAssist prefill 策略。
@@ -538,11 +523,6 @@ class ModelConfig:
         object.__setattr__(self, "retnet_state_lifecycle", str(self.retnet_state_lifecycle))
         object.__setattr__(self, "retnet_state_dim", int(self.retnet_state_dim))
         object.__setattr__(self, "retnet_adapter_rank", int(self.retnet_adapter_rank))
-        object.__setattr__(
-            self,
-            "retnet_adapter_target",
-            tuple(str(value) for value in _as_tuple(self.retnet_adapter_target)),
-        )
         object.__setattr__(self, "retnet_adapter_alpha_q_init", float(self.retnet_adapter_alpha_q_init))
         object.__setattr__(self, "retnet_adapter_alpha_q_dtype", str(self.retnet_adapter_alpha_q_dtype))
         object.__setattr__(
@@ -550,14 +530,6 @@ class ModelConfig:
             "retnet_adapter_alpha_q_trainable",
             bool(self.retnet_adapter_alpha_q_trainable),
         )
-        object.__setattr__(self, "retnet_adapter_alpha_k_init", float(self.retnet_adapter_alpha_k_init))
-        object.__setattr__(self, "retnet_adapter_alpha_k_dtype", str(self.retnet_adapter_alpha_k_dtype))
-        object.__setattr__(
-            self,
-            "retnet_adapter_alpha_k_trainable",
-            bool(self.retnet_adapter_alpha_k_trainable),
-        )
-        object.__setattr__(self, "retnet_k_adapter_enabled", bool(self.retnet_k_adapter_enabled))
         object.__setattr__(
             self,
             "retnet_context_adapter_enabled",
@@ -607,8 +579,6 @@ class ModelConfig:
             "xlstm_memory_as_router_target",
             bool(self.xlstm_memory_as_router_target),
         )
-        object.__setattr__(self, "xlstm_memory_gate_enabled", bool(self.xlstm_memory_gate_enabled))
-        object.__setattr__(self, "xlstm_memory_gate_mode", str(self.xlstm_memory_gate_mode))
         object.__setattr__(self, "xlstm_memory_granularity", str(self.xlstm_memory_granularity))
         object.__setattr__(self, "xlstm_memory_prefill_policy", str(self.xlstm_memory_prefill_policy))
         object.__setattr__(self, "xlstm_memory_state_continuity", str(self.xlstm_memory_state_continuity))
@@ -824,28 +794,10 @@ class ModelConfig:
             raise ValueError("retnet_state_dim 必须为正整数。")
         if self.retnet_adapter_rank <= 0:
             raise ValueError("retnet_adapter_rank 必须为正整数。")
-        adapter_target = tuple(dict.fromkeys(str(value) for value in self.retnet_adapter_target))
-        if set(adapter_target) == {"q"}:
-            adapter_target = ("q",)
-        elif set(adapter_target) == {"q", "k"}:
-            adapter_target = ("q", "k")
-        else:
-            raise ValueError("retnet_adapter_target 必须是 ('q',) 或 ('q', 'k')。")
-        object.__setattr__(self, "retnet_adapter_target", adapter_target)
         if self.retnet_adapter_alpha_q_init < 0:
             raise ValueError("retnet_adapter_alpha_q_init 不能为负数。")
         if self.retnet_adapter_alpha_q_dtype != "fp32":
             raise ValueError("retnet_adapter_alpha_q_dtype 当前必须是 fp32。")
-        if self.retnet_adapter_alpha_k_init < 0:
-            raise ValueError("retnet_adapter_alpha_k_init 不能为负数。")
-        if self.retnet_adapter_alpha_k_dtype != "fp32":
-            raise ValueError("retnet_adapter_alpha_k_dtype 当前必须是 fp32。")
-        if self.retnet_k_adapter_enabled != ("k" in self.retnet_adapter_target):
-            raise ValueError("retnet_k_adapter_enabled 必须与 retnet_adapter_target 是否包含 k 一致。")
-        if self.retnet_assist_mode == "q_adapter" and self.retnet_k_adapter_enabled:
-            raise ValueError("retnet_assist_mode=q_adapter 时不能启用 K adapter。")
-        if self.retnet_assist_mode == "qk_adapter" and not self.retnet_k_adapter_enabled:
-            raise ValueError("retnet_assist_mode=qk_adapter 时必须启用 K adapter。")
         if self.retnet_context_adapter_alpha < 0:
             raise ValueError("retnet_context_adapter_alpha 不能为负数。")
         if self.retnet_context_adapter_enabled and (
@@ -925,10 +877,6 @@ class ModelConfig:
                 raise ValueError("xlstm_memory_enabled=false 时 xlstm_memory_layers 必须是 disabled。")
             if self.moe_router_input_mode != "ffn_norm_only_eval":
                 raise ValueError("关闭 xLSTMAssist 时 moe_router_input_mode 必须是 ffn_norm_only_eval。")
-            if self.xlstm_memory_gate_enabled:
-                raise ValueError("xlstm_memory_gate_enabled=true 时必须启用 xLSTMAssist。")
-        if self.xlstm_memory_gate_enabled and self.xlstm_memory_gate_mode != "input_conditioned_eval":
-            raise ValueError("xlstm_memory_gate_mode 当前仅支持 input_conditioned_eval。")
 
         if self.block_type != LPT_V2_BLOCK_TYPE:
             raise ValueError(f"lpt_v2 的 block_type 必须是 {LPT_V2_BLOCK_TYPE}。")

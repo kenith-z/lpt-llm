@@ -415,13 +415,6 @@ def load_manifest_entries(manifest_path):
 _load_manifest_entries = load_manifest_entries
 
 
-def _normalize_weight(weight):
-    """校验并归一化 manifest weight。"""
-    if not isinstance(weight, (int, float)) or weight < 0:
-        raise ValueError(f"weight 非法: {weight}")
-    return float(weight)
-
-
 def _count_dataset_records(
     dataset_path,
     expected_types,
@@ -486,7 +479,10 @@ def _build_manifest_entry_plan(
     resolved_dataset_path = _resolve_manifest_dataset_path(manifest_path, dataset_path)
     entry_name = entry.get("name") or resolved_dataset_path.stem
     seed_text = f"{manifest_path}:{entry_name}:{resolved_dataset_path}"
-    weight = _normalize_weight(entry.get("weight", 1.0))
+    weight = entry.get("weight", 1.0)
+    if not isinstance(weight, (int, float)) or weight < 0:
+        raise ValueError(f"weight 非法: {weight}")
+    weight = float(weight)
     sample_limit = entry.get("sample_limit")
     if weight == 0:
         return ManifestEntryPlan(

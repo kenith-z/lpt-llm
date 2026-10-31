@@ -109,37 +109,20 @@ def get_template_spec(template_version=None):
         raise ValueError(f"未知模板版本: {resolved_version}") from error
 
 
-def _normalize_content(content, *, label):
-    """校验模板内容字段，去除首尾空白并拒绝空字符串。"""
+def _normalize_content(content, *, label, allow_empty=False):
+    """校验内容字段，去除首尾空白。"""
     if not isinstance(content, str):
         raise TypeError(f"{label} 必须是字符串。")
     normalized = content.strip()
-    if not normalized:
+    if not allow_empty and not normalized:
         raise ValueError(f"{label} 不能为空。")
     return normalized
-
-
-def _normalize_optional_content(content, *, label):
-    """校验可选文本字段，空白值归一为空字符串。"""
-    if content is None:
-        return ""
-    if not isinstance(content, str):
-        raise TypeError(f"{label} 必须是字符串。")
-    return content.strip()
 
 
 def _normalize_message_content(message, *, label, allow_empty=False):
     """按消息类型规范化 content；Function Call assistant 可允许空 content。"""
     content = message.get("content", "")
-    if allow_empty:
-        return _normalize_optional_content(content, label=label)
-    return _normalize_content(content, label=label)
-
-
-def _reject_legacy_think_tags(content, *, label):
-    """拒绝旧版自然文本 thinking 边界，要求数据先转换为结构化字段。"""
-    if "<think>" in content or "</think>" in content:
-        raise ValueError(f"{label} 不能包含 <think> 或 </think>，请先转换为 thinking 字段。")
+    return _normalize_content(content, label=label, allow_empty=True) if allow_empty else _normalize_content(content, label=label)
 
 
 def _jsonable_tool_arguments(arguments, *, label):
@@ -166,7 +149,7 @@ def _normalize_tool_call(tool_call, *, label):
         "name": name,
         "arguments": arguments,
     }
-    tool_call_id = _normalize_optional_content(tool_call.get("id"), label=f"{label}.id")
+    tool_call_id = _normalize_content(tool_call.get("id"), label=f"{label}.id", allow_empty=True)
     if tool_call_id:
         normalized["id"] = tool_call_id
     return normalized
@@ -248,26 +231,31 @@ def validate_messages(messages):
             "content": content,
         }
         if role == ASSISTANT_ROLE:
-            _reject_legacy_think_tags(content, label=f"第 {index} 条 assistant 消息内容")
+            if "<think>" in content or "</think>" in content:
+                raise ValueError(f"第 {index} 条 assistant 消息内容不能包含 <think> 或 </think>，请先转换为 thinking 字段。")
             if tool_calls:
                 normalized_message["tool_calls"] = list(tool_calls)
             if "thinking" in message:
-                thinking = _normalize_optional_content(
+                thinking = _normalize_content(
                     message.get("thinking"),
                     label=f"第 {index} 条 assistant thinking",
+                    allow_empty=True,
                 )
-                _reject_legacy_think_tags(thinking, label=f"第 {index} 条 assistant thinking")
+                if "<think>" in thinking or "</think>" in thinking:
+                    raise ValueError(f"第 {index} 条 assistant thinking 不能包含 <think> 或 </think>，请先转换为 thinking 字段。")
                 normalized_message["thinking"] = thinking
         elif "thinking" in message:
-            _normalize_optional_content(
+            _normalize_content(
                 message.get("thinking"),
                 label=f"第 {index} 条非 assistant thinking",
+                allow_empty=True,
             )
             raise ValueError("thinking 字段只能出现在 assistant 消息上。")
         if role == OBSERVATION_ROLE and "tool_call_id" in message:
-            tool_call_id = _normalize_optional_content(
+            tool_call_id = _normalize_content(
                 message.get("tool_call_id"),
                 label=f"第 {index} 条 observation tool_call_id",
+                allow_empty=True,
             )
             if tool_call_id:
                 normalized_message["tool_call_id"] = tool_call_id

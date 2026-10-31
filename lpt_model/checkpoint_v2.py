@@ -80,8 +80,6 @@ def _state_schema_metadata(config):
             "lifecycle": config.retnet_state_lifecycle,
             "assist_mode": config.retnet_assist_mode,
             "adapter_rank": int(config.retnet_adapter_rank),
-            "adapter_target": list(config.retnet_adapter_target),
-            "k_adapter_enabled": bool(config.retnet_k_adapter_enabled),
             "context_adapter_enabled": bool(config.retnet_context_adapter_enabled),
             "context_adapter_alpha": float(config.retnet_context_adapter_alpha),
         },

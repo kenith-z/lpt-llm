@@ -106,13 +106,6 @@ THINKING_SUMMARY_COUNTER_KEYS = (
 )
 
 
-def _normalize_thinking_visibility(visibility):
-    """规范化训练/推理审计中的 thinking 可见性字段。"""
-    normalized = "hidden" if visibility is None else str(visibility).strip().lower()
-    if normalized not in THINKING_VISIBILITIES:
-        raise ValueError("thinking_visibility 必须是 hidden 或 visible。")
-    return normalized
-
 PHASE_DISPLAY_NAMES = {
     "train": "训练(train)",
     "eval": "验证(eval)",
@@ -277,31 +270,17 @@ class TrainingRunConfig:
         if self.best_checkpoint_metric not in {"loss", "eval_loss"}:
             raise ValueError("best_checkpoint_metric 必须是 loss 或 eval_loss。")
         self.best_checkpoint_min_delta = float(self.best_checkpoint_min_delta)
-        if self.best_checkpoint_min_delta < 0:
-            raise ValueError("best_checkpoint_min_delta 必须为非负数。")
         self.key_checkpoints = tuple(sorted({int(value) for value in self.key_checkpoints if int(value) > 0}))
         self.thinking_mode = normalize_thinking_mode(self.thinking_mode)
-        self.thinking_visibility = _normalize_thinking_visibility(self.thinking_visibility)
-        if self.optimizer_type not in {"adamw", "adamw8bit"}:
-            raise ValueError("optimizer_type 必须是 adamw 或 adamw8bit。")
+        self.thinking_visibility = "hidden" if self.thinking_visibility is None else str(self.thinking_visibility).strip().lower()
         self.gradient_checkpointing = bool(self.gradient_checkpointing)
         self.data_num_workers = int(self.data_num_workers)
-        if self.data_num_workers < 0:
-            raise ValueError("data_num_workers 必须为非负整数。")
         self.data_prefetch_factor = int(self.data_prefetch_factor)
-        if self.data_prefetch_factor <= 0:
-            raise ValueError("data_prefetch_factor 必须为正整数。")
         self.data_persistent_workers = bool(self.data_persistent_workers)
         self.data_pin_memory = bool(self.data_pin_memory)
         self.data_reader_num_workers = int(self.data_reader_num_workers)
-        if self.data_reader_num_workers < 0:
-            raise ValueError("data_reader_num_workers 必须为非负整数。")
         self.data_reader_chunk_bytes = int(self.data_reader_chunk_bytes)
-        if self.data_reader_chunk_bytes <= 0:
-            raise ValueError("data_reader_chunk_bytes 必须为正整数。")
         self.data_length_bucket_window = int(self.data_length_bucket_window)
-        if self.data_length_bucket_window < 0:
-            raise ValueError("data_length_bucket_window 必须为非负整数。")
         self.data_packing_strategy = str(self.data_packing_strategy).strip().lower()
         if self.data_packing_strategy not in {"sequential", "first_fit"}:
             raise ValueError("data_packing_strategy 必须是 sequential 或 first_fit。")
